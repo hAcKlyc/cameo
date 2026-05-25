@@ -34,6 +34,47 @@ function Format-Size($path) {
   if ($bytes -ge 1KB) { return "{0:N1} KB" -f ($bytes / 1KB) }
   return "$bytes B"
 }
+function Repair-NsisTauriUtilsCache {
+  if (-not $env:LOCALAPPDATA) {
+    Warn "LOCALAPPDATA is not set - cannot prefetch Tauri's NSIS helper cache"
+    return
+  }
+
+  $url = 'https://github.com/tauri-apps/nsis-tauri-utils/releases/download/nsis_tauri_utils-v0.5.3/nsis_tauri_utils.dll'
+  $expectedSha1 = '75197FEE3C6A814FE035788D1C34EAD39349B860'
+  $pluginDir = Join-Path $env:LOCALAPPDATA 'tauri\NSIS\Plugins\x86-unicode\additional'
+  $dll = Join-Path $pluginDir 'nsis_tauri_utils.dll'
+  $tmp = Join-Path ([System.IO.Path]::GetTempPath()) ("nsis_tauri_utils-" + [System.Guid]::NewGuid().ToString('N') + ".dll")
+
+  Info "refreshing Tauri NSIS helper cache"
+  New-Item -ItemType Directory -Path $pluginDir -Force | Out-Null
+  if (Test-Path $dll) { Remove-Item -LiteralPath $dll -Force -ErrorAction SilentlyContinue }
+
+  for ($attempt = 1; $attempt -le 3; $attempt++) {
+    try {
+      Info "downloading nsis_tauri_utils.dll (attempt $attempt/3)"
+      Invoke-WebRequest -Uri $url -OutFile $tmp -UseBasicParsing
+      if ((Get-Item -LiteralPath $tmp).Length -le 0) { throw "downloaded file is empty" }
+      $actualSha1 = (Get-FileHash -LiteralPath $tmp -Algorithm SHA1).Hash.ToUpperInvariant()
+      if ($actualSha1 -ne $expectedSha1) { throw "hash mismatch: expected $expectedSha1, got $actualSha1" }
+      Move-Item -LiteralPath $tmp -Destination $dll -Force
+      Ok "cached nsis_tauri_utils.dll at $dll"
+      return
+    } catch {
+      Warn "download attempt $attempt failed: $($_.Exception.Message)"
+      Remove-Item -LiteralPath $tmp -Force -ErrorAction SilentlyContinue
+      if ($attempt -lt 3) { Start-Sleep -Seconds (5 * $attempt) }
+    }
+  }
+
+  Warn "could not prefetch nsis_tauri_utils.dll; retrying Tauri anyway"
+}
+function Invoke-TauriReleaseBuild {
+  Info "pnpm tauri build --target $Target --bundles nsis"
+  $env:NODE_OPTIONS = '--max-old-space-size=4096'
+  pnpm tauri build --target $Target --bundles nsis
+  $script:TauriBuildExitCode = $LASTEXITCODE
+}
 
 $Target = 'x86_64-pc-windows-msvc'
 
@@ -126,10 +167,20 @@ $start = Get-Date
 # tauri-plugin-updater downloads at runtime. Windows Tauri only accepts
 # `msi`/`nsis` as bundle names; unlike macOS, there is no separate `updater`
 # bundle value to pass here.
-Info "pnpm tauri build --target $Target --bundles nsis"
-$env:NODE_OPTIONS = '--max-old-space-size=4096'
-pnpm tauri build --target $Target --bundles nsis
-if ($LASTEXITCODE -ne 0) { Die "tauri build failed" }
+$script:TauriBuildExitCode = 0
+Invoke-TauriReleaseBuild
+$buildCode = $script:TauriBuildExitCode
+if ($buildCode -ne 0) {
+  $releaseExe = Join-Path $PSScriptRoot "src-tauri\target\$Target\release\cameo.exe"
+  if (Test-Path $releaseExe) {
+    Warn "tauri build failed after the release exe was produced; NSIS bundling may have hit a corrupt cache or GitHub download timeout"
+    Repair-NsisTauriUtilsCache
+    Info "retrying tauri build once"
+    Invoke-TauriReleaseBuild
+    $buildCode = $script:TauriBuildExitCode
+  }
+  if ($buildCode -ne 0) { Die "tauri build failed" }
+}
 
 $nsisDir = Join-Path $PSScriptRoot "src-tauri\target\$Target\release\bundle\nsis"
 $installer = Get-ChildItem -Path $nsisDir -Filter '*-setup.exe' -ErrorAction SilentlyContinue |
