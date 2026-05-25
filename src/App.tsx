@@ -266,17 +266,28 @@ export default function App() {
   // Start the Codex session when a Board opens; tear it down on change/exit.
   useEffect(() => {
     if (!boardId) return;
+    let cancelled = false;
+    const startedBoardId = boardId;
+    const startedRestartNonce = restartNonce;
+    const isCurrentStart = () =>
+      !cancelled &&
+      useBoardStore.getState().boardId === startedBoardId &&
+      useSettingsStore.getState().restartNonce === startedRestartNonce;
+
     const chat = useChatStore.getState();
     chat.reset();
     chat.setSessionStatus("starting");
     ipc
-      .startSession(boardId)
+      .startSession(startedBoardId)
       .then(async () => {
+        if (!isCurrentStart()) return;
         useChatStore.getState().setSessionStatus("ready");
         // Load session list + the active session's persisted timeline.
-        await useChatStore.getState().initSessions();
+        await useChatStore.getState().initSessions(startedBoardId, startedRestartNonce);
+        if (!isCurrentStart()) return;
         // Headless e2e hook: auto-send a prompt if CAMEO_TEST_PROMPT is set.
         const testPrompt = await ipc.initialTestPrompt();
+        if (!isCurrentStart()) return;
         if (testPrompt) {
           const st = useBoardStore.getState();
           const first = [...st.placements.keys()][0];
@@ -290,14 +301,27 @@ export default function App() {
               { kind: "rect", points: [[-hw * 0.4, -hh * 0.4], [hw * 0.4, hh * 0.4]] },
             ]);
           }
-          useChatStore.getState().startTurn(testPrompt, refs);
-          const overlays = await buildOverlays(boardId, refs);
-          void ipc.sendMessage(boardId, testPrompt, refs, overlays);
+          const turn = useChatStore.getState().startTurn(testPrompt, refs);
+          try {
+            const overlays = await buildOverlays(startedBoardId, refs);
+            if (!isCurrentStart()) return;
+            await ipc.sendMessage(startedBoardId, testPrompt, refs, overlays);
+          } catch (e) {
+            if (isCurrentStart()) {
+              useChatStore.getState().failTurn(
+                `Could not send test prompt: ${e instanceof Error ? e.message : String(e)}`,
+                turn,
+              );
+            }
+          }
         }
       })
-      .catch((e) => useChatStore.getState().setSessionStatus("error", String(e)));
+      .catch((e) => {
+        if (isCurrentStart()) useChatStore.getState().setSessionStatus("error", String(e));
+      });
     return () => {
-      void ipc.stopSession(boardId);
+      cancelled = true;
+      void ipc.stopSession(startedBoardId);
     };
   }, [boardId, restartNonce]);
 

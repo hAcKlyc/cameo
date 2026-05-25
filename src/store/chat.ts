@@ -102,6 +102,12 @@ export type ChatMessage =
   | { id: string; role: "user"; text: string; refs: string[] }
   | { id: string; role: "assistant"; blocks: ChatBlock[]; status: "streaming" | "done" | "error"; error?: string };
 
+export interface TurnScope {
+  boardId: string | null;
+  sessionId: string | null;
+  assistantId: string;
+}
+
 interface ChatState {
   sessionStatus: SessionStatus;
   turnStatus: TurnStatus;
@@ -123,14 +129,18 @@ interface ChatState {
 
   reset: () => void;
   setSessionStatus: (s: SessionStatus, error?: string) => void;
-  startTurn: (text: string, refs: string[]) => void;
+  startTurn: (text: string, refs: string[]) => TurnScope;
+  /** Mark the optimistic pre-send turn as failed without restarting Codex. Used
+   *  when overlay rendering or the turn/start IPC rejects before any runtime
+   *  terminal event can arrive. */
+  failTurn: (reason: string, scope?: TurnScope) => void;
   /** Best-effort interrupt + guaranteed UI clear. Sends turn/interrupt, then
    *  if codex doesn't ack within STOP_ESCALATION_GRACE_MS, tree-kills the
    *  sidecar and rebuilds the session. UI ALWAYS exits "running" state. */
   stopTurn: () => void;
   handleEvent: (e: CodexEvent) => void;
   /** Load the session list + the active session's timeline (on board open). */
-  initSessions: () => Promise<void>;
+  initSessions: (expectedBoardId?: string, expectedRestartNonce?: number) => Promise<void>;
   /** Lazily resolve a path referenced in chat text. First call kicks the
    *  Rust resolver and writes "pending"; on completion the Map gets the full
    *  resolution. Subsequent calls return the cached entry. */
@@ -288,6 +298,54 @@ function forceRestartSession(
   };
 }
 
+/** Local failure path for an optimistic turn that never reached Codex. This keeps
+ *  the same user/assistant message shape as runtime failures, but deliberately
+ *  does not kill or restart the sidecar: the transport failure is already
+ *  surfaced and the next send can retry against the current session. */
+function failLocalTurn(st: ChatState, reason: string, scope?: TurnScope): Partial<ChatState> {
+  const currentBoardId = useBoardStore.getState().boardId;
+  if (scope?.boardId && currentBoardId !== scope.boardId) return {};
+
+  const boardId = scope?.boardId ?? currentBoardId;
+  const sessionId = scope?.sessionId ?? st.activeSessionId;
+  const { messages } = st;
+
+  let targetIndex = -1;
+  for (let i = messages.length - 1; i >= 0; i--) {
+    const m = messages[i];
+    if (m.role === "assistant" && (!scope || m.id === scope.assistantId)) {
+      targetIndex = i;
+      break;
+    }
+  }
+  if (targetIndex < 0) return {};
+
+  const failedAsst = (() => {
+    const m = messages[targetIndex] as AsstMsg;
+    const settled = settle(m);
+    const withNote =
+      settled.blocks.length === 0
+        ? { ...settled, blocks: [{ type: "note" as const, level: "error", text: reason }] }
+        : settled;
+    return { ...withNote, status: "error" as const, error: reason };
+  })();
+  const nextMessages = messages.slice();
+  nextMessages[targetIndex] = failedAsst;
+  const isLatestAssistant = !messages.slice(targetIndex + 1).some((m) => m.role === "assistant");
+
+  if (isLatestAssistant) watchdog.stop();
+
+  if (boardId && sessionId) {
+    void ipc.appendMessage(boardId, sessionId, failedAsst).catch(() => { /* best effort */ });
+  }
+
+  return {
+    turnStatus: isLatestAssistant ? "idle" : st.turnStatus,
+    error: isLatestAssistant ? reason : st.error,
+    messages: nextMessages,
+  };
+}
+
 /** Record an auto-restart and decide whether the loop breaker should trip. */
 function shouldBreakRestartLoop(): boolean {
   const now = Date.now();
@@ -401,7 +459,10 @@ export const useChatStore = create<ChatState>((set, get) => ({
         void ipc.renameSession(boardId, activeSessionId, text.trim().slice(0, 24)).then(() => get().refreshSessions());
       }
     }
+    return { boardId, sessionId: activeSessionId, assistantId: asstMsg.id };
   },
+
+  failTurn: (reason, scope) => set((st) => failLocalTurn(st, reason, scope)),
 
   stopTurn: () => {
     const st = get();
@@ -482,6 +543,16 @@ export const useChatStore = create<ChatState>((set, get) => ({
           return {
             messages: updateLast(st.messages, (m) =>
               patchLast(m, (b) => b.type === "tool" && b.id === e.toolUseId, (b) => ({ ...b, status: "done" }))
+            ),
+          };
+        case "permissionRequest":
+          return {
+            messages: updateLast(st.messages, (m) =>
+              pushBlock(m, {
+                type: "note",
+                level: "info",
+                text: `Approved Codex request: ${e.summary || `request ${e.requestId}`}`,
+              })
             ),
           };
         case "generationStarted":
@@ -598,13 +669,17 @@ export const useChatStore = create<ChatState>((set, get) => ({
     });
   },
 
-  initSessions: async () => {
-    const boardId = useBoardStore.getState().boardId;
+  initSessions: async (expectedBoardId, expectedRestartNonce) => {
+    const boardId = expectedBoardId ?? useBoardStore.getState().boardId;
     if (!boardId) return;
     const doc = await ipc.listSessions(boardId);
+    if (useBoardStore.getState().boardId !== boardId) return;
+    if (expectedRestartNonce !== undefined && useSettingsStore.getState().restartNonce !== expectedRestartNonce) return;
     const active = doc.activeSessionId ?? doc.sessions[0]?.id ?? null;
     let messages: ChatMessage[] = [];
     if (active) messages = (await ipc.loadSession(boardId, active)) as ChatMessage[];
+    if (useBoardStore.getState().boardId !== boardId) return;
+    if (expectedRestartNonce !== undefined && useSettingsStore.getState().restartNonce !== expectedRestartNonce) return;
     set({ sessions: doc.sessions, activeSessionId: active, messages });
   },
 

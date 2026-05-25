@@ -534,7 +534,8 @@ export class CanvasScene {
       const url = cameoUrl(this.boardId, asset.path);
       loadTexture(url)
         .then((tex) => {
-          if (this.destroyed || !this.nodes.has(p.id)) {
+          const current = this.nodes.get(p.id);
+          if (this.destroyed || current !== node || current.assetId !== p.assetId) {
             tex.destroy(true);
             return;
           }

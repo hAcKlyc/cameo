@@ -10,7 +10,7 @@ use crate::paths::{board_session_timeline, board_sessions_doc};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::io::Write;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -41,9 +41,24 @@ pub fn load(folder: &Path) -> SessionsDoc {
 }
 
 pub fn save(folder: &Path, doc: &SessionsDoc) {
-    if let Ok(json) = serde_json::to_vec_pretty(doc) {
-        let _ = std::fs::write(board_sessions_doc(folder), json);
+    if let Err(e) = write_json_atomic(board_sessions_doc(folder), doc) {
+        tracing::warn!(module = "session", "save sessions.json failed: {e}");
     }
+}
+
+fn write_json_atomic(path: PathBuf, doc: &SessionsDoc) -> anyhow::Result<()> {
+    if let Some(dir) = path.parent() {
+        std::fs::create_dir_all(dir)?;
+    }
+    let base = path
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("sessions.json");
+    let tmp = path.with_file_name(format!("{base}.{}.tmp", nanoid::nanoid!(8)));
+    let json = serde_json::to_vec_pretty(doc)?;
+    std::fs::write(&tmp, json)?;
+    std::fs::rename(&tmp, &path)?;
+    Ok(())
 }
 
 fn make_session(thread_id: Option<String>, title: &str) -> SessionMeta {
@@ -110,7 +125,11 @@ pub fn rename(folder: &Path, id: &str, title: &str) {
 }
 
 pub fn thread_of(folder: &Path, id: &str) -> Option<String> {
-    load(folder).sessions.into_iter().find(|s| s.id == id).and_then(|s| s.thread_id)
+    load(folder)
+        .sessions
+        .into_iter()
+        .find(|s| s.id == id)
+        .and_then(|s| s.thread_id)
 }
 
 /// Append one message (opaque JSON) to a session's timeline + bump updatedAt.

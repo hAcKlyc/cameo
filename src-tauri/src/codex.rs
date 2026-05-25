@@ -96,9 +96,17 @@ pub fn detect() -> CodexInfo {
                 .filter(|o| o.status.success())
                 .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
                 .filter(|s| !s.is_empty());
-            CodexInfo { found: true, path: Some(p.to_string_lossy().to_string()), version }
+            CodexInfo {
+                found: true,
+                path: Some(p.to_string_lossy().to_string()),
+                version,
+            }
         }
-        Err(_) => CodexInfo { found: false, path: None, version: None },
+        Err(_) => CodexInfo {
+            found: false,
+            path: None,
+            version: None,
+        },
     }
 }
 
@@ -121,6 +129,10 @@ pub struct CodexSessionInner {
     current_turn_id: PlMutex<Option<String>>,
     /// Placement ids referenced by the in-flight turn (drives output placement).
     current_sources: PlMutex<Vec<String>>,
+    /// Overlay temp files written for the in-flight turn. Deleted only after a
+    /// terminal runtime event or failed turn/start, so Codex can read them while
+    /// the turn is active.
+    current_overlays: PlMutex<Vec<String>>,
     /// Generated outputs so far in the current turn (vertical stacking index).
     output_index: AtomicU64,
     /// Accumulated agentMessage text per item id, for tail backfill.
@@ -128,6 +140,9 @@ pub struct CodexSessionInner {
     /// imageGeneration item id → (loading placeholder id, layout index), set at
     /// item/started so the final image lands where the placeholder showed.
     pending_gen: PlMutex<HashMap<String, (String, i64)>>,
+    /// Set before intentional teardown paths so the reader EOF doesn't emit a
+    /// stale SessionComplete into a board that is already restarting/switching.
+    intentional_shutdown: PlMutex<bool>,
 }
 
 pub struct CodexSession {
@@ -151,6 +166,17 @@ impl CodexRegistry {
     fn remove(&self, board_id: &str) -> Option<Arc<CodexSession>> {
         self.inner.lock().remove(board_id)
     }
+    fn remove_if_same(&self, board_id: &str, target: &Arc<CodexSession>) -> bool {
+        let mut inner = self.inner.lock();
+        let Some(current) = inner.get(board_id) else {
+            return false;
+        };
+        if !Arc::ptr_eq(current, target) {
+            return false;
+        }
+        inner.remove(board_id);
+        true
+    }
     pub fn board_ids(&self) -> Vec<String> {
         self.inner.lock().keys().cloned().collect()
     }
@@ -159,8 +185,7 @@ impl CodexRegistry {
     /// directly (no async RPC / sleep). Used from the RunEvent handler, where
     /// blocking on the async runtime during shutdown is deadlock-prone.
     pub fn kill_all_sync(&self) {
-        let sessions: Vec<Arc<CodexSession>> =
-            self.inner.lock().drain().map(|(_, s)| s).collect();
+        let sessions: Vec<Arc<CodexSession>> = self.inner.lock().drain().map(|(_, s)| s).collect();
         for s in sessions {
             // SIGKILL the group (unix) / taskkill /T /F the tree (windows).
             kill_tree(s.pid, 9);
@@ -178,7 +203,10 @@ impl CodexSessionInner {
     }
 
     async fn write(&self, msg: &Value) -> Result<(), String> {
-        let line = format!("{}\n", serde_json::to_string(msg).map_err(|e| e.to_string())?);
+        let line = format!(
+            "{}\n",
+            serde_json::to_string(msg).map_err(|e| e.to_string())?
+        );
         let mut stdin = self.stdin.lock().await;
         stdin
             .write_all(line.as_bytes())
@@ -192,11 +220,19 @@ impl CodexSessionInner {
         let id = self.next_id.fetch_add(1, Ordering::SeqCst);
         let (tx, rx) = oneshot::channel();
         self.pending.lock().insert(id, tx);
-        self.write(&json!({"jsonrpc":"2.0","id":id,"method":method,"params":params}))
-            .await?;
+        if let Err(e) = self
+            .write(&json!({"jsonrpc":"2.0","id":id,"method":method,"params":params}))
+            .await
+        {
+            self.pending.lock().remove(&id);
+            return Err(e);
+        }
         match tokio::time::timeout(Duration::from_millis(timeout_ms), rx).await {
             Ok(Ok(res)) => res,
-            Ok(Err(_)) => Err("rpc channel closed (process exited?)".into()),
+            Ok(Err(_)) => {
+                self.pending.lock().remove(&id);
+                Err("rpc channel closed (process exited?)".into())
+            }
             Err(_) => {
                 self.pending.lock().remove(&id);
                 Err(format!("rpc '{method}' timed out after {timeout_ms}ms"))
@@ -211,13 +247,60 @@ impl CodexSessionInner {
     }
 
     async fn respond(&self, id: u64, result: Value) {
-        let _ = self.write(&json!({"jsonrpc":"2.0","id":id,"result":result})).await;
+        let _ = self
+            .write(&json!({"jsonrpc":"2.0","id":id,"result":result}))
+            .await;
     }
 }
 
 fn is_stale_thread(err: &str) -> bool {
     let e = err.to_lowercase();
-    e.contains("no rollout found") || e.contains("thread not found") || e.contains("conversation not found")
+    e.contains("no rollout found")
+        || e.contains("thread not found")
+        || e.contains("conversation not found")
+}
+
+async fn discard_session(
+    codex_reg: &Arc<CodexRegistry>,
+    board_id: &str,
+    session: &Arc<CodexSession>,
+) {
+    if !codex_reg.remove_if_same(board_id, session) {
+        return;
+    }
+    *session.inner.intentional_shutdown.lock() = true;
+    session.inner.pending.lock().clear();
+    #[cfg(unix)]
+    {
+        kill_tree(session.pid, 15);
+        tokio::time::sleep(Duration::from_millis(250)).await;
+    }
+    kill_tree(session.pid, 9);
+    let mut child = session.child.lock().await;
+    let _ = child.start_kill();
+}
+
+fn is_overlay_temp_path(path: &str) -> bool {
+    let p = Path::new(path);
+    p.components().count() == 1 && path.starts_with(".overlay-") && path.ends_with(".png")
+}
+
+fn cleanup_dispatch_overlays(inner: &Arc<CodexSessionInner>) {
+    let overlays = {
+        let mut current = inner.current_overlays.lock();
+        std::mem::take(&mut *current)
+    };
+    for rel in overlays {
+        if !is_overlay_temp_path(&rel) {
+            tracing::warn!(module = "codex", overlay = %rel, "skip unsafe overlay cleanup path");
+            continue;
+        }
+        if let Err(e) = std::fs::remove_file(inner.folder.join(&rel)) {
+            if e.kind() != std::io::ErrorKind::NotFound {
+                tracing::warn!(module = "codex", overlay = %rel, "overlay cleanup failed: {e}");
+            }
+        }
+    }
 }
 
 // ── Public API (used by commands) ────────────────────────────────────────────
@@ -230,7 +313,12 @@ pub async fn start_session(
     board_id: String,
 ) -> Result<String, String> {
     if let Some(existing) = codex_reg.get(&board_id) {
-        return Ok(existing.inner.thread_id.lock().clone());
+        let thread_id = existing.inner.thread_id.lock().clone();
+        if !thread_id.is_empty() {
+            return Ok(thread_id);
+        }
+        tracing::warn!(module = "codex", board = %board_id, "discarding uninitialized codex session");
+        discard_session(&codex_reg, &board_id, &existing).await;
     }
     let folder = board_reg.folder(&board_id).ok_or("unknown board")?;
     let codex = resolve_codex()?;
@@ -252,11 +340,25 @@ pub async fn start_session(
     // re-read per spawn, so a Settings change applies on the next session start
     // (the frontend restarts the active session on save).
     crate::proxy::apply_to_subprocess(&mut cmd, Some(&crate::config::load().proxy));
-    let mut child = cmd.spawn().map_err(|e| format!("spawn codex app-server: {e}"))?;
+    let mut child = cmd
+        .spawn()
+        .map_err(|e| format!("spawn codex app-server: {e}"))?;
     let pid = child.id().unwrap_or(0);
-    let stdin = child.stdin.take().ok_or("no stdin")?;
-    let stdout = child.stdout.take().ok_or("no stdout")?;
-    let stderr = child.stderr.take().ok_or("no stderr")?;
+    let Some(stdin) = child.stdin.take() else {
+        kill_tree(pid, 9);
+        let _ = child.start_kill();
+        return Err("no stdin".into());
+    };
+    let Some(stdout) = child.stdout.take() else {
+        kill_tree(pid, 9);
+        let _ = child.start_kill();
+        return Err("no stdout".into());
+    };
+    let Some(stderr) = child.stderr.take() else {
+        kill_tree(pid, 9);
+        let _ = child.start_kill();
+        return Err("no stderr".into());
+    };
 
     let inner = Arc::new(CodexSessionInner {
         app,
@@ -270,25 +372,26 @@ pub async fn start_session(
         active_session_id: PlMutex::new(String::new()),
         current_turn_id: PlMutex::new(None),
         current_sources: PlMutex::new(Vec::new()),
+        current_overlays: PlMutex::new(Vec::new()),
         output_index: AtomicU64::new(0),
         agent_accum: PlMutex::new(HashMap::new()),
         pending_gen: PlMutex::new(HashMap::new()),
+        intentional_shutdown: PlMutex::new(false),
     });
 
     tauri::async_runtime::spawn(reader_loop(inner.clone(), stdout));
     tauri::async_runtime::spawn(stderr_drain(inner.clone(), stderr));
 
-    codex_reg.insert(
-        board_id.clone(),
-        Arc::new(CodexSession {
-            inner: inner.clone(),
-            child: TokioMutex::new(child),
-            pid,
-        }),
-    );
+    let session = Arc::new(CodexSession {
+        inner: inner.clone(),
+        child: TokioMutex::new(child),
+        pid,
+    });
+
+    codex_reg.insert(board_id.clone(), session.clone());
 
     // Handshake.
-    inner
+    if let Err(e) = inner
         .call(
             "initialize",
             json!({
@@ -297,7 +400,11 @@ pub async fn start_session(
             }),
             15_000,
         )
-        .await?;
+        .await
+    {
+        discard_session(&codex_reg, &board_id, &session).await;
+        return Err(e);
+    }
     inner.notify("initialized", json!({})).await;
 
     // Resume (or migrate from legacy meta.threadId) the ACTIVE session's thread.
@@ -310,7 +417,13 @@ pub async fn start_session(
         .find(|s| s.id == active)
         .and_then(|s| s.thread_id.clone());
 
-    let thread_id = ensure_thread(&inner, &folder, &active, prev).await?;
+    let thread_id = match ensure_thread(&inner, &folder, &active, prev).await {
+        Ok(thread_id) => thread_id,
+        Err(e) => {
+            discard_session(&codex_reg, &board_id, &session).await;
+            return Err(e);
+        }
+    };
     *inner.active_session_id.lock() = active.clone();
     *inner.thread_id.lock() = thread_id.clone();
 
@@ -319,7 +432,10 @@ pub async fn start_session(
     meta.active_session_id = Some(active.clone());
     storage::save_meta(&folder, &meta);
 
-    inner.emit(UnifiedEvent::SessionInit { thread_id: thread_id.clone(), model: String::new() });
+    inner.emit(UnifiedEvent::SessionInit {
+        thread_id: thread_id.clone(),
+        model: String::new(),
+    });
     tracing::info!(module = "codex", board = %board_id, session = %active, thread = %thread_id, "codex session ready");
     Ok(thread_id)
 }
@@ -352,7 +468,13 @@ async fn ensure_thread(
             Err(e) => return Err(e),
         }
     } else {
-        let res = inner.call("thread/start", new_thread_params(folder, approval, sandbox, &dev), 30_000).await?;
+        let res = inner
+            .call(
+                "thread/start",
+                new_thread_params(folder, approval, sandbox, &dev),
+                30_000,
+            )
+            .await?;
         thread_id_of(&res).ok_or("thread/start: no thread id")?
     };
     session::set_thread(folder, session_id, &id);
@@ -360,7 +482,10 @@ async fn ensure_thread(
 }
 
 /// Create a new session (fresh thread) and make it active.
-pub async fn new_session(codex_reg: Arc<CodexRegistry>, board_id: String) -> Result<String, String> {
+pub async fn new_session(
+    codex_reg: Arc<CodexRegistry>,
+    board_id: String,
+) -> Result<String, String> {
     let session = codex_reg.get(&board_id).ok_or("session not started")?;
     let inner = &session.inner;
     let folder = inner.folder.clone();
@@ -420,16 +545,21 @@ pub async fn send_message(
 ) -> Result<(), String> {
     let session = codex_reg.get(&board_id).ok_or("session not started")?;
     let inner = &session.inner;
+    let overlay_map: HashMap<String, String> = overlays.into_iter().collect();
+    *inner.current_overlays.lock() = overlay_map.values().cloned().collect();
+
     let thread_id = inner.thread_id.lock().clone();
     if thread_id.is_empty() {
+        cleanup_dispatch_overlays(inner);
         return Err("session has no thread yet".into());
     }
 
-    let overlay_map: HashMap<String, String> = overlays.into_iter().collect();
-
     // Resolve placement ids → (clean asset path, optional marking-overlay path).
     let refs: Vec<(String, Option<String>)> = {
-        let entry = inner.registry.get(&board_id).ok_or("unknown board")?;
+        let Some(entry) = inner.registry.get(&board_id) else {
+            cleanup_dispatch_overlays(inner);
+            return Err("unknown board".into());
+        };
         let doc = entry.doc.lock();
         source_placement_ids
             .iter()
@@ -446,10 +576,25 @@ pub async fn send_message(
 
     let prompt = build_turn_prompt(&text, &refs);
     let input = json!([{ "type": "text", "text": prompt, "text_elements": [] }]);
-    let res = inner
-        .call("turn/start", json!({ "threadId": thread_id, "input": input, "summary": "concise" }), 15_000)
-        .await?;
-    if let Some(tid) = res.get("turn").and_then(|t| t.get("id")).and_then(|v| v.as_str()) {
+    let res = match inner
+        .call(
+            "turn/start",
+            json!({ "threadId": thread_id, "input": input, "summary": "concise" }),
+            15_000,
+        )
+        .await
+    {
+        Ok(res) => res,
+        Err(e) => {
+            cleanup_dispatch_overlays(inner);
+            return Err(e);
+        }
+    };
+    if let Some(tid) = res
+        .get("turn")
+        .and_then(|t| t.get("id"))
+        .and_then(|v| v.as_str())
+    {
         *inner.current_turn_id.lock() = Some(tid.to_string());
     }
     tracing::info!(module = "codex", refs = refs.len(), "turn/start ok");
@@ -484,7 +629,11 @@ pub async fn interrupt_turn(codex_reg: Arc<CodexRegistry>, board_id: String) -> 
     let turn = inner.current_turn_id.lock().clone();
     if let Some(turn_id) = turn {
         let _ = inner
-            .call("turn/interrupt", json!({ "threadId": thread_id, "turnId": turn_id }), 3_000)
+            .call(
+                "turn/interrupt",
+                json!({ "threadId": thread_id, "turnId": turn_id }),
+                3_000,
+            )
             .await;
     }
     Ok(())
@@ -499,7 +648,10 @@ pub async fn respond_permission(
     let session = codex_reg.get(&board_id).ok_or("no session")?;
     session
         .inner
-        .respond(request_id, json!({ "decision": if accept { "accept" } else { "decline" } }))
+        .respond(
+            request_id,
+            json!({ "decision": if accept { "accept" } else { "decline" } }),
+        )
         .await;
     Ok(())
 }
@@ -507,9 +659,15 @@ pub async fn respond_permission(
 /// Probe ChatGPT-subscription auth. Returns (authMethod, requiresLogin).
 pub async fn auth_status(codex_reg: Arc<CodexRegistry>, board_id: String) -> Result<Value, String> {
     let session = codex_reg.get(&board_id).ok_or("no session")?;
-    let res = session.inner.call("getAuthStatus", json!({}), 10_000).await?;
+    let res = session
+        .inner
+        .call("getAuthStatus", json!({}), 10_000)
+        .await?;
     let auth_method = res.get("authMethod").and_then(|v| v.as_str());
-    let requires_openai = res.get("requiresOpenaiAuth").and_then(|v| v.as_bool()).unwrap_or(false);
+    let requires_openai = res
+        .get("requiresOpenaiAuth")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
     Ok(json!({
         "authMethod": auth_method,
         "requiresLogin": auth_method.is_none() && requires_openai,
@@ -518,13 +676,20 @@ pub async fn auth_status(codex_reg: Arc<CodexRegistry>, board_id: String) -> Res
 
 /// Tear down a Board's session: interrupt, then tree-kill.
 pub async fn stop_session(codex_reg: Arc<CodexRegistry>, board_id: &str) {
-    let Some(session) = codex_reg.remove(board_id) else { return };
+    let Some(session) = codex_reg.remove(board_id) else {
+        return;
+    };
     let inner = &session.inner;
+    *inner.intentional_shutdown.lock() = true;
     let thread_id = inner.thread_id.lock().clone();
     let turn = inner.current_turn_id.lock().clone();
     if let Some(turn_id) = turn {
         let _ = inner
-            .call("turn/interrupt", json!({ "threadId": thread_id, "turnId": turn_id }), 2_000)
+            .call(
+                "turn/interrupt",
+                json!({ "threadId": thread_id, "turnId": turn_id }),
+                2_000,
+            )
             .await;
     }
     // unix: graceful SIGTERM over the group, wait, then SIGKILL.
@@ -537,6 +702,7 @@ pub async fn stop_session(codex_reg: Arc<CodexRegistry>, board_id: &str) {
     }
     #[cfg(not(unix))]
     kill_tree(session.pid, 9);
+    cleanup_dispatch_overlays(inner);
     let mut child = session.child.lock().await;
     let _ = child.start_kill();
 }
@@ -605,7 +771,11 @@ async fn reader_loop(inner: Arc<CodexSessionInner>, stdout: ChildStdout) {
                     handle_notification(&inner, method, params).await;
                 } else if has_method && has_id {
                     let id = msg.get("id").and_then(|v| v.as_u64()).unwrap_or(0);
-                    let method = msg.get("method").and_then(|v| v.as_str()).unwrap_or("").to_string();
+                    let method = msg
+                        .get("method")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("")
+                        .to_string();
                     handle_server_request(&inner, id, &method).await;
                 }
             }
@@ -617,10 +787,13 @@ async fn reader_loop(inner: Arc<CodexSessionInner>, stdout: ChildStdout) {
     for (_, tx) in drained {
         let _ = tx.send(Err("app-server process exited".into()));
     }
-    inner.emit(UnifiedEvent::SessionComplete {
-        ok: false,
-        message: "Codex process exited".into(),
-    });
+    cleanup_dispatch_overlays(&inner);
+    if !*inner.intentional_shutdown.lock() {
+        inner.emit(UnifiedEvent::SessionComplete {
+            ok: false,
+            message: "Codex process exited".into(),
+        });
+    }
 }
 
 /// Codex stderr lines whose lowercased text contains one of these substrings are
@@ -630,7 +803,11 @@ const STDERR_SURFACE: &[(&str, &str, &str)] = &[
     ("401", "warn", "认证失败 (401) — 确认已 codex login"),
     ("403", "warn", "无权限 (403)"),
     ("unauthorized", "warn", "认证失败 — 确认已 codex login"),
-    ("error sending request", "error", "网络请求失败 — 检查网络/代理"),
+    (
+        "error sending request",
+        "error",
+        "网络请求失败 — 检查网络/代理",
+    ),
     ("connection refused", "error", "连接被拒绝 — 检查网络/代理"),
     ("connection reset", "error", "连接被重置 — 检查网络/代理"),
     ("timed out", "error", "请求超时 — 检查网络/代理"),
@@ -649,9 +826,14 @@ async fn stderr_drain(inner: Arc<CodexSessionInner>, stderr: tokio::process::Chi
         // Always captured in the unified log at info so it's visible by default.
         tracing::info!(module = "codex-stderr", "{text}");
         let low = text.to_lowercase();
-        if let Some((_, level, prefix)) = STDERR_SURFACE.iter().find(|(sub, _, _)| low.contains(sub)) {
+        if let Some((_, level, prefix)) =
+            STDERR_SURFACE.iter().find(|(sub, _, _)| low.contains(sub))
+        {
             let detail: String = text.chars().take(200).collect();
-            inner.emit(UnifiedEvent::Log { level: (*level).into(), message: format!("{prefix}: {detail}") });
+            inner.emit(UnifiedEvent::Log {
+                level: (*level).into(),
+                message: format!("{prefix}: {detail}"),
+            });
         }
     }
 }
@@ -684,22 +866,39 @@ async fn handle_notification(inner: &Arc<CodexSessionInner>, method: &str, param
     match method {
         "item/agentMessage/delta" => {
             let delta = params.get("delta").and_then(|v| v.as_str()).unwrap_or("");
-            let item_id = params.get("itemId").and_then(|v| v.as_str()).unwrap_or("_").to_string();
+            let item_id = params
+                .get("itemId")
+                .and_then(|v| v.as_str())
+                .unwrap_or("_")
+                .to_string();
             if !delta.is_empty() {
-                inner.agent_accum.lock().entry(item_id).or_default().push_str(delta);
-                inner.emit(UnifiedEvent::TextDelta { text: delta.to_string() });
+                inner
+                    .agent_accum
+                    .lock()
+                    .entry(item_id)
+                    .or_default()
+                    .push_str(delta);
+                inner.emit(UnifiedEvent::TextDelta {
+                    text: delta.to_string(),
+                });
             }
         }
         "item/reasoning/summaryTextDelta" | "item/reasoning/textDelta" | "item/plan/delta" => {
             let delta = params.get("delta").and_then(|v| v.as_str()).unwrap_or("");
             if !delta.is_empty() {
-                inner.emit(UnifiedEvent::ThinkingDelta { text: delta.to_string() });
+                inner.emit(UnifiedEvent::ThinkingDelta {
+                    text: delta.to_string(),
+                });
             }
         }
         "item/started" => {
             let item = params.get("item").cloned().unwrap_or(Value::Null);
             let typ = item.get("type").and_then(|v| v.as_str()).unwrap_or("");
-            let id = item.get("id").and_then(|v| v.as_str()).unwrap_or("").to_string();
+            let id = item
+                .get("id")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
             match typ {
                 "reasoning" | "plan" => inner.emit(UnifiedEvent::ThinkingStart),
                 // Non-tool items that don't render as their own chat block.
@@ -727,19 +926,32 @@ async fn handle_notification(inner: &Arc<CodexSessionInner>, method: &str, param
             handle_item_completed(inner, &item).await;
         }
         "turn/started" => {
-            if let Some(tid) = params.get("turn").and_then(|t| t.get("id")).and_then(|v| v.as_str()) {
+            if let Some(tid) = params
+                .get("turn")
+                .and_then(|t| t.get("id"))
+                .and_then(|v| v.as_str())
+            {
                 *inner.current_turn_id.lock() = Some(tid.to_string());
             }
-            inner.emit(UnifiedEvent::Status { state: "running".into() });
+            inner.emit(UnifiedEvent::Status {
+                state: "running".into(),
+            });
         }
         "turn/completed" => {
             let turn = params.get("turn").cloned().unwrap_or(Value::Null);
-            let status = turn.get("status").and_then(|v| v.as_str()).unwrap_or("completed").to_string();
+            let status = turn
+                .get("status")
+                .and_then(|v| v.as_str())
+                .unwrap_or("completed")
+                .to_string();
             // Codex usually puts the reason in `turn.error.message`, but tolerate
             // a string-form `error` too. Never surface a blank message: on a
             // non-completed status with no reason, synthesize one from the status.
             let raw_error = turn.get("error").and_then(|e| {
-                e.get("message").and_then(|v| v.as_str()).map(String::from).or_else(|| e.as_str().map(String::from))
+                e.get("message")
+                    .and_then(|v| v.as_str())
+                    .map(String::from)
+                    .or_else(|| e.as_str().map(String::from))
             });
             let error = match (status.as_str(), raw_error) {
                 ("completed", _) => None,
@@ -757,6 +969,7 @@ async fn handle_notification(inner: &Arc<CodexSessionInner>, method: &str, param
             inner.agent_accum.lock().clear();
             inner.current_sources.lock().clear();
             inner.pending_gen.lock().clear();
+            cleanup_dispatch_overlays(inner);
             inner.emit(UnifiedEvent::TurnComplete { status, error });
         }
         "thread/tokenUsage/updated" => {
@@ -769,12 +982,21 @@ async fn handle_notification(inner: &Arc<CodexSessionInner>, method: &str, param
             }
         }
         "thread/status/changed" => {
-            if let Some(s) = params.get("status").and_then(|s| s.get("type")).and_then(|v| v.as_str()) {
-                inner.emit(UnifiedEvent::Status { state: s.to_string() });
+            if let Some(s) = params
+                .get("status")
+                .and_then(|s| s.get("type"))
+                .and_then(|v| v.as_str())
+            {
+                inner.emit(UnifiedEvent::Status {
+                    state: s.to_string(),
+                });
             }
         }
         "turn/plan/updated" => {
-            let explanation = params.get("explanation").and_then(|v| v.as_str()).map(String::from);
+            let explanation = params
+                .get("explanation")
+                .and_then(|v| v.as_str())
+                .map(String::from);
             let steps = params
                 .get("plan")
                 .and_then(|v| v.as_array())
@@ -783,7 +1005,11 @@ async fn handle_notification(inner: &Arc<CodexSessionInner>, method: &str, param
                         .filter_map(|s| {
                             Some(PlanStep {
                                 step: s.get("step")?.as_str()?.to_string(),
-                                status: s.get("status").and_then(|v| v.as_str()).unwrap_or("pending").to_string(),
+                                status: s
+                                    .get("status")
+                                    .and_then(|v| v.as_str())
+                                    .unwrap_or("pending")
+                                    .to_string(),
                             })
                         })
                         .collect()
@@ -807,7 +1033,9 @@ async fn handle_notification(inner: &Arc<CodexSessionInner>, method: &str, param
             {
                 inner.emit(UnifiedEvent::RateLimits {
                     used_percent: primary_used,
-                    resets_at: primary.and_then(|p| p.get("resetsAt")).and_then(|v| v.as_f64()),
+                    resets_at: primary
+                        .and_then(|p| p.get("resetsAt"))
+                        .and_then(|v| v.as_f64()),
                     secondary_used_percent: secondary
                         .and_then(|p| p.get("usedPercent"))
                         .and_then(|v| v.as_f64()),
@@ -822,9 +1050,15 @@ async fn handle_notification(inner: &Arc<CodexSessionInner>, method: &str, param
             }
         }
         "error" => {
-            let msg = params.get("message").and_then(|v| v.as_str()).unwrap_or("unknown error");
+            let msg = params
+                .get("message")
+                .and_then(|v| v.as_str())
+                .unwrap_or("unknown error");
             tracing::error!(module = "codex", "error notification: {msg}");
-            inner.emit(UnifiedEvent::Error { message: msg.to_string() });
+            cleanup_dispatch_overlays(inner);
+            inner.emit(UnifiedEvent::Error {
+                message: msg.to_string(),
+            });
         }
         "warning" | "guardianWarning" | "configWarning" | "deprecationNotice" => {
             let msg = params
@@ -834,7 +1068,10 @@ async fn handle_notification(inner: &Arc<CodexSessionInner>, method: &str, param
                 .unwrap_or("");
             tracing::warn!(module = "codex", "{method}: {msg}");
             if !msg.is_empty() {
-                inner.emit(UnifiedEvent::Log { level: "warn".into(), message: msg.to_string() });
+                inner.emit(UnifiedEvent::Log {
+                    level: "warn".into(),
+                    message: msg.to_string(),
+                });
             }
         }
         _ => { /* forward-compat: ignore unknown notifications */ }
@@ -843,7 +1080,11 @@ async fn handle_notification(inner: &Arc<CodexSessionInner>, method: &str, param
 
 async fn handle_item_completed(inner: &Arc<CodexSessionInner>, item: &Value) {
     let typ = item.get("type").and_then(|v| v.as_str()).unwrap_or("");
-    let id = item.get("id").and_then(|v| v.as_str()).unwrap_or("").to_string();
+    let id = item
+        .get("id")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
     match typ {
         "imageGeneration" => {
             inner.emit(UnifiedEvent::ToolStop { tool_use_id: id });
@@ -854,9 +1095,13 @@ async fn handle_item_completed(inner: &Arc<CodexSessionInner>, item: &Value) {
             let streamed = inner.agent_accum.lock().remove(&id).unwrap_or_default();
             if !final_text.is_empty() {
                 if streamed.is_empty() {
-                    inner.emit(UnifiedEvent::TextDelta { text: final_text.to_string() });
+                    inner.emit(UnifiedEvent::TextDelta {
+                        text: final_text.to_string(),
+                    });
                 } else if final_text.starts_with(&streamed) && final_text.len() > streamed.len() {
-                    inner.emit(UnifiedEvent::TextDelta { text: final_text[streamed.len()..].to_string() });
+                    inner.emit(UnifiedEvent::TextDelta {
+                        text: final_text[streamed.len()..].to_string(),
+                    });
                 }
             }
             inner.emit(UnifiedEvent::TextStop);
@@ -867,14 +1112,23 @@ async fn handle_item_completed(inner: &Arc<CodexSessionInner>, item: &Value) {
         | "exitedReviewMode" => {}
         // Every other type is a tool — incl. mcp/dynamic/collab + future types.
         _ => {
-            inner.emit(UnifiedEvent::ToolStop { tool_use_id: id.clone() });
+            inner.emit(UnifiedEvent::ToolStop {
+                tool_use_id: id.clone(),
+            });
             let content = item
                 .get("aggregatedOutput")
                 .and_then(|v| v.as_str())
-                .or_else(|| item.get("error").and_then(|e| e.get("message")).and_then(|v| v.as_str()))
+                .or_else(|| {
+                    item.get("error")
+                        .and_then(|e| e.get("message"))
+                        .and_then(|v| v.as_str())
+                })
                 .unwrap_or("")
                 .to_string();
-            inner.emit(UnifiedEvent::ToolResult { tool_use_id: id, content });
+            inner.emit(UnifiedEvent::ToolResult {
+                tool_use_id: id,
+                content,
+            });
         }
     }
 }
@@ -895,7 +1149,9 @@ fn tool_label(typ: &str, item: &Value) -> String {
             _ => "MCP tool".into(),
         },
         "dynamicToolCall" => s("tool").unwrap_or("Tool").into(),
-        "collabAgentToolCall" => s("tool").map(|t| format!("Agent·{t}")).unwrap_or_else(|| "Agent".into()),
+        "collabAgentToolCall" => s("tool")
+            .map(|t| format!("Agent·{t}"))
+            .unwrap_or_else(|| "Agent".into()),
         other => other.into(),
     }
 }
@@ -905,7 +1161,10 @@ fn tool_label(typ: &str, item: &Value) -> String {
 /// Truncated; None when there's nothing useful to show.
 fn tool_detail(typ: &str, item: &Value) -> Option<String> {
     let raw = match typ {
-        "commandExecution" => item.get("command").and_then(|v| v.as_str()).map(String::from),
+        "commandExecution" => item
+            .get("command")
+            .and_then(|v| v.as_str())
+            .map(String::from),
         "fileChange" => item
             .get("changes")
             .and_then(|c| c.as_array())
@@ -934,7 +1193,9 @@ fn start_generation(inner: &Arc<CodexSessionInner>, item_id: &str) {
     let index = inner.output_index.fetch_add(1, Ordering::SeqCst) as i64;
     let placeholder_id = nanoid::nanoid!();
     let rect = {
-        let Some(entry) = inner.registry.get(&inner.board_id) else { return };
+        let Some(entry) = inner.registry.get(&inner.board_id) else {
+            return;
+        };
         let doc = entry.doc.lock();
         let sources = inner.current_sources.lock().clone();
         let source_pair = sources.first().and_then(|sid| {
@@ -944,7 +1205,10 @@ fn start_generation(inner: &Arc<CodexSessionInner>, item_id: &str) {
         });
         board::placeholder_rect(source_pair.as_ref().map(|(p, a)| (p, a)), index, &doc)
     };
-    inner.pending_gen.lock().insert(item_id.to_string(), (placeholder_id.clone(), index));
+    inner
+        .pending_gen
+        .lock()
+        .insert(item_id.to_string(), (placeholder_id.clone(), index));
     inner.emit(UnifiedEvent::GenerationStarted {
         placeholder_id,
         x: rect.0,
@@ -955,15 +1219,25 @@ fn start_generation(inner: &Arc<CodexSessionInner>, item_id: &str) {
 }
 
 async fn on_image_generation(inner: &Arc<CodexSessionInner>, item: &Value) {
-    let caption = item.get("revisedPrompt").and_then(|v| v.as_str()).map(String::from);
+    let caption = item
+        .get("revisedPrompt")
+        .and_then(|v| v.as_str())
+        .map(String::from);
     let saved_path = item.get("savedPath").and_then(|v| v.as_str());
     let result_b64 = item.get("result").and_then(|v| v.as_str());
-    let item_id = item.get("id").and_then(|v| v.as_str()).unwrap_or("").to_string();
+    let item_id = item
+        .get("id")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
 
     // Pair with the placeholder claimed at item/started (reuse its slot index).
     let (placeholder_id, out_index) = match inner.pending_gen.lock().remove(&item_id) {
         Some((pid, idx)) => (Some(pid), idx),
-        None => (None, inner.output_index.fetch_add(1, Ordering::SeqCst) as i64),
+        None => (
+            None,
+            inner.output_index.fetch_add(1, Ordering::SeqCst) as i64,
+        ),
     };
 
     // Snapshot the asset list for content-dedup without holding the lock during IO.
@@ -978,7 +1252,9 @@ async fn on_image_generation(inner: &Arc<CodexSessionInner>, item: &Value) {
         match assets::import_generated_file(&inner.folder, Path::new(sp), &assets_snapshot) {
             Ok(a) => a,
             Err(e) => {
-                inner.emit(UnifiedEvent::Error { message: format!("save generated image: {e}") });
+                inner.emit(UnifiedEvent::Error {
+                    message: format!("save generated image: {e}"),
+                });
                 return;
             }
         }
@@ -994,12 +1270,16 @@ async fn on_image_generation(inner: &Arc<CodexSessionInner>, item: &Value) {
             ) {
                 Ok(a) => a,
                 Err(e) => {
-                    inner.emit(UnifiedEvent::Error { message: format!("write generated image: {e}") });
+                    inner.emit(UnifiedEvent::Error {
+                        message: format!("write generated image: {e}"),
+                    });
                     return;
                 }
             },
             Err(e) => {
-                inner.emit(UnifiedEvent::Error { message: format!("decode generated image: {e}") });
+                inner.emit(UnifiedEvent::Error {
+                    message: format!("decode generated image: {e}"),
+                });
                 return;
             }
         }
@@ -1007,9 +1287,13 @@ async fn on_image_generation(inner: &Arc<CodexSessionInner>, item: &Value) {
         return; // nothing to place
     };
 
-    // Lock only for the in-memory mutation, then save the clone outside the lock.
+    // Serialize mutation snapshots with disk saves so board.json cannot be rolled
+    // back by an older clone, while keeping the doc lock itself IO-free.
+    let Some(entry) = inner.registry.get(&inner.board_id) else {
+        return;
+    };
+    let save_guard = entry.save.lock();
     let (placement, doc_clone) = {
-        let Some(entry) = inner.registry.get(&inner.board_id) else { return };
         let mut doc = entry.doc.lock();
         let sources = inner.current_sources.lock().clone();
         let source_pair = sources.first().and_then(|sid| {
@@ -1033,12 +1317,21 @@ async fn on_image_generation(inner: &Arc<CodexSessionInner>, item: &Value) {
     if let Err(e) = storage::save_board_doc(&inner.folder, &doc_clone) {
         tracing::warn!(module = "codex", "save board after generation failed: {e}");
     }
-    inner.emit(UnifiedEvent::ImageGenerated { asset, placement, caption, placeholder_id });
+    drop(save_guard);
+    inner.emit(UnifiedEvent::ImageGenerated {
+        asset,
+        placement,
+        caption,
+        placeholder_id,
+    });
 }
 
 async fn handle_server_request(inner: &Arc<CodexSessionInner>, id: u64, method: &str) {
     // With approvalPolicy=never these are rare. Surface it, then auto-accept so
     // the turn never hangs (the workspace-write sandbox bounds the risk).
-    inner.emit(UnifiedEvent::PermissionRequest { request_id: id, summary: method.to_string() });
+    inner.emit(UnifiedEvent::PermissionRequest {
+        request_id: id,
+        summary: method.to_string(),
+    });
     inner.respond(id, json!({ "decision": "accept" })).await;
 }

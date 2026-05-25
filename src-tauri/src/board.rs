@@ -16,6 +16,10 @@ use std::sync::Arc;
 pub struct BoardEntry {
     pub folder: PathBuf,
     pub doc: Mutex<BoardDoc>,
+    /// Serializes doc mutation snapshots with their disk saves. Commands keep
+    /// expensive IO outside `doc`, but this prevents an older clone from saving
+    /// after a newer mutation and rolling back `board.json`.
+    pub save: Mutex<()>,
     /// Display name (workspace name); mutable via rename.
     pub name: Mutex<String>,
 }

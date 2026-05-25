@@ -3,7 +3,9 @@
 
 use crate::board::{self, BoardEntry, BoardRegistry};
 use crate::codex::{self, CodexRegistry};
-use crate::model::{Annotation, Asset, BoardInfo, Origin, Placement, Shape, BOARD_DOC_VERSION};
+use crate::model::{
+    Annotation, Asset, BoardDoc, BoardInfo, Origin, Placement, Shape, BOARD_DOC_VERSION,
+};
 use crate::paths::ensure_board_sidecar;
 use crate::session::{self, SessionsDoc};
 use crate::workspace::{self, WorkspaceEntry};
@@ -18,6 +20,20 @@ fn e2s<E: std::fmt::Display>(e: E) -> String {
     e.to_string()
 }
 
+fn with_doc_save<T>(
+    entry: &BoardEntry,
+    f: impl FnOnce(&mut BoardDoc) -> Result<T, String>,
+) -> Result<T, String> {
+    let _save = entry.save.lock();
+    let (result, doc_clone) = {
+        let mut doc = entry.doc.lock();
+        let result = f(&mut doc)?;
+        (result, doc.clone())
+    };
+    storage::save_board_doc(&entry.folder, &doc_clone).map_err(e2s)?;
+    Ok(result)
+}
+
 /// Folder to auto-open on launch: CAMEO_OPEN_BOARD (testing) → else the most
 /// recent workspace → else create a fresh default workspace.
 #[tauri::command]
@@ -30,7 +46,9 @@ pub fn initial_board() -> Option<String> {
     if let Some(first) = workspace::list().into_iter().next() {
         return Some(first.path);
     }
-    workspace::create().ok().map(|p| p.to_string_lossy().to_string())
+    workspace::create()
+        .ok()
+        .map(|p| p.to_string_lossy().to_string())
 }
 
 // ── Workspace commands (v0.0.2) ──────────────────────────────────────────────
@@ -43,7 +61,9 @@ pub fn list_workspaces() -> Vec<WorkspaceEntry> {
 /// Create a fresh board folder in the app area; returns its path (frontend opens it).
 #[tauri::command]
 pub fn create_workspace() -> Result<String, String> {
-    workspace::create().map(|p| p.to_string_lossy().to_string()).map_err(e2s)
+    workspace::create()
+        .map(|p| p.to_string_lossy().to_string())
+        .map_err(e2s)
 }
 
 /// Rename a workspace (display name only — folder + boardId stay). Updates the
@@ -81,16 +101,15 @@ pub fn remove_workspace(id: String) -> Result<(), String> {
 /// testing of the dispatch → generate → place loop. Dev/testing only.
 #[tauri::command]
 pub fn initial_test_prompt() -> Option<String> {
-    std::env::var("CAMEO_TEST_PROMPT").ok().filter(|s| !s.is_empty())
+    std::env::var("CAMEO_TEST_PROMPT")
+        .ok()
+        .filter(|s| !s.is_empty())
 }
 
 /// Open (or create) a Board from a local folder. Reconciles folder→doc, then
 /// registers the in-memory authority and returns the full doc.
 #[tauri::command]
-pub fn open_board(
-    path: String,
-    registry: State<Arc<BoardRegistry>>,
-) -> Result<BoardInfo, String> {
+pub fn open_board(path: String, registry: State<Arc<BoardRegistry>>) -> Result<BoardInfo, String> {
     let folder = PathBuf::from(&path);
     if !folder.is_dir() {
         return Err(format!("not a folder: {path}"));
@@ -107,8 +126,14 @@ pub fn open_board(
     // Stable id + display name, persisted in meta.json (generated once). Renames
     // and folder moves never change the id (cameo:// / board.json stay valid).
     let mut meta = storage::load_meta(&folder);
-    let id = meta.board_id.clone().unwrap_or_else(|| board::board_id_for(&folder));
-    let name = meta.name.clone().unwrap_or_else(|| storage::folder_name(&folder));
+    let id = meta
+        .board_id
+        .clone()
+        .unwrap_or_else(|| board::board_id_for(&folder));
+    let name = meta
+        .name
+        .clone()
+        .unwrap_or_else(|| storage::folder_name(&folder));
     if meta.board_id.is_none() || meta.name.is_none() {
         meta.board_id = Some(id.clone());
         meta.name = Some(name.clone());
@@ -120,13 +145,19 @@ pub fn open_board(
         BoardEntry {
             folder: folder.clone(),
             doc: Mutex::new(doc.clone()),
+            save: Mutex::new(()),
             name: Mutex::new(name.clone()),
         },
     );
     workspace::touch(&id, &folder, &name); // record in the recent-workspaces index
 
     tracing::info!(module = "commands", board = %id, placements = doc.placements.len(), "board opened");
-    Ok(BoardInfo { id, folder: path, name, doc })
+    Ok(BoardInfo {
+        id,
+        folder: path,
+        name,
+        doc,
+    })
 }
 
 #[derive(Serialize)]
@@ -148,27 +179,39 @@ pub fn import_paths(
     registry: State<Arc<BoardRegistry>>,
 ) -> Result<ImportResult, String> {
     let entry = registry.get(&board_id).ok_or("unknown board")?;
-    let mut doc = entry.doc.lock();
-    let mut out = ImportResult {
-        assets: Vec::new(),
-        placements: Vec::new(),
-    };
-
+    let mut known_assets = entry.doc.lock().assets.clone();
     let mut staged: Vec<Asset> = Vec::new();
     for p in &paths {
         let src = PathBuf::from(p);
-        match assets::import_external(&entry.folder, &src, &doc.assets) {
+        match assets::import_external(&entry.folder, &src, &known_assets) {
             Ok(asset) => {
-                if !doc.assets.iter().any(|a| a.id == asset.id) {
-                    doc.assets.push(asset.clone());
-                    out.assets.push(asset.clone());
+                if !known_assets.iter().any(|a| a.id == asset.id) {
+                    known_assets.push(asset.clone());
                 }
                 staged.push(asset);
             }
             Err(e) => tracing::warn!(module = "commands", "import {p} failed: {e}"),
         }
     }
-    if !staged.is_empty() {
+
+    if staged.is_empty() {
+        return Ok(ImportResult {
+            assets: Vec::new(),
+            placements: Vec::new(),
+        });
+    }
+
+    with_doc_save(&entry, |doc| {
+        let mut out = ImportResult {
+            assets: Vec::new(),
+            placements: Vec::new(),
+        };
+        for asset in &staged {
+            if !doc.assets.iter().any(|a| a.id == asset.id) {
+                doc.assets.push(asset.clone());
+                out.assets.push(asset.clone());
+            }
+        }
         let foots: Vec<(f64, f64)> = staged.iter().map(board::footprint).collect();
         let centers = board::flow_layout(board::next_batch_top(&doc), &foots);
         let base_z = doc.placements.len() as i64;
@@ -178,10 +221,8 @@ pub fn import_paths(
             doc.placements.push(placement.clone());
             out.placements.push(placement);
         }
-    }
-
-    storage::save_board_doc(&entry.folder, &doc).map_err(e2s)?;
-    Ok(out)
+        Ok(out)
+    })
 }
 
 /// Import raw image bytes (clipboard paste).
@@ -194,28 +235,36 @@ pub fn import_image_bytes(
     registry: State<Arc<BoardRegistry>>,
 ) -> Result<ImportResult, String> {
     let entry = registry.get(&board_id).ok_or("unknown board")?;
-    let mut doc = entry.doc.lock();
     let stem = if stem.is_empty() { "paste" } else { &stem };
+    let assets_snapshot = entry.doc.lock().assets.clone();
 
-    let asset =
-        assets::import_bytes(&entry.folder, &bytes, &ext, stem, Origin::Paste, &doc.assets).map_err(e2s)?;
-    let mut out = ImportResult {
-        assets: Vec::new(),
-        placements: Vec::new(),
-    };
-    let is_new = !doc.assets.iter().any(|a| a.id == asset.id);
-    if is_new {
-        doc.assets.push(asset.clone());
-        out.assets.push(asset.clone());
-    }
-    let centers = board::flow_layout(board::next_batch_top(&doc), &[board::footprint(&asset)]);
-    let (x, y) = centers[0];
-    let placement = board::make_placement(&asset, x, y, doc.placements.len() as i64, None);
-    doc.placements.push(placement.clone());
-    out.placements.push(placement);
+    let asset = assets::import_bytes(
+        &entry.folder,
+        &bytes,
+        &ext,
+        stem,
+        Origin::Paste,
+        &assets_snapshot,
+    )
+    .map_err(e2s)?;
 
-    storage::save_board_doc(&entry.folder, &doc).map_err(e2s)?;
-    Ok(out)
+    with_doc_save(&entry, |doc| {
+        let mut out = ImportResult {
+            assets: Vec::new(),
+            placements: Vec::new(),
+        };
+        let is_new = !doc.assets.iter().any(|a| a.id == asset.id);
+        if is_new {
+            doc.assets.push(asset.clone());
+            out.assets.push(asset.clone());
+        }
+        let centers = board::flow_layout(board::next_batch_top(&doc), &[board::footprint(&asset)]);
+        let (x, y) = centers[0];
+        let placement = board::make_placement(&asset, x, y, doc.placements.len() as i64, None);
+        doc.placements.push(placement.clone());
+        out.placements.push(placement);
+        Ok(out)
+    })
 }
 
 #[derive(Deserialize)]
@@ -237,18 +286,18 @@ pub fn update_placements(
     registry: State<Arc<BoardRegistry>>,
 ) -> Result<(), String> {
     let entry = registry.get(&board_id).ok_or("unknown board")?;
-    let mut doc = entry.doc.lock();
-    for u in &updates {
-        if let Some(p) = doc.placements.iter_mut().find(|p| p.id == u.id) {
-            p.x = u.x;
-            p.y = u.y;
-            p.scale = u.scale;
-            p.rotation = u.rotation;
-            p.z = u.z;
+    with_doc_save(&entry, |doc| {
+        for u in &updates {
+            if let Some(p) = doc.placements.iter_mut().find(|p| p.id == u.id) {
+                p.x = u.x;
+                p.y = u.y;
+                p.scale = u.scale;
+                p.rotation = u.rotation;
+                p.z = u.z;
+            }
         }
-    }
-    storage::save_board_doc(&entry.folder, &doc).map_err(e2s)?;
-    Ok(())
+        Ok(())
+    })
 }
 
 /// Remove Placements from the canvas. Non-destructive: the Asset + file stay on
@@ -260,10 +309,10 @@ pub fn delete_placements(
     registry: State<Arc<BoardRegistry>>,
 ) -> Result<(), String> {
     let entry = registry.get(&board_id).ok_or("unknown board")?;
-    let mut doc = entry.doc.lock();
-    doc.placements.retain(|p| !ids.contains(&p.id));
-    storage::save_board_doc(&entry.folder, &doc).map_err(e2s)?;
-    Ok(())
+    with_doc_save(&entry, |doc| {
+        doc.placements.retain(|p| !ids.contains(&p.id));
+        Ok(())
+    })
 }
 
 /// Re-insert placements (undo of delete / redo of add). Idempotent by id; the
@@ -275,18 +324,18 @@ pub fn restore_placements(
     registry: State<Arc<BoardRegistry>>,
 ) -> Result<(), String> {
     let entry = registry.get(&board_id).ok_or("unknown board")?;
-    let mut doc = entry.doc.lock();
-    for p in placements {
-        // Upsert by id: restores a deleted placement OR reverts a changed one
-        // (e.g. undo of crop, which swapped the assetId).
-        if let Some(existing) = doc.placements.iter_mut().find(|e| e.id == p.id) {
-            *existing = p;
-        } else {
-            doc.placements.push(p);
+    with_doc_save(&entry, |doc| {
+        for p in placements {
+            // Upsert by id: restores a deleted placement OR reverts a changed one
+            // (e.g. undo of crop, which swapped the assetId).
+            if let Some(existing) = doc.placements.iter_mut().find(|e| e.id == p.id) {
+                *existing = p;
+            } else {
+                doc.placements.push(p);
+            }
         }
-    }
-    storage::save_board_doc(&entry.folder, &doc).map_err(e2s)?;
-    Ok(())
+        Ok(())
+    })
 }
 
 #[derive(Serialize)]
@@ -309,23 +358,41 @@ pub fn replace_placement_image(
     registry: State<Arc<BoardRegistry>>,
 ) -> Result<ReplaceResult, String> {
     let entry = registry.get(&board_id).ok_or("unknown board")?;
-    let mut doc = entry.doc.lock();
-    let asset =
-        assets::import_bytes(&entry.folder, &bytes, &ext, "crop", Origin::Crop, &doc.assets).map_err(e2s)?;
-    let is_new = !doc.assets.iter().any(|a| a.id == asset.id);
-    if is_new {
-        doc.assets.push(asset.clone());
-    }
-    let placement = doc
-        .placements
-        .iter_mut()
-        .find(|p| p.id == placement_id)
-        .ok_or("placement not found")?;
-    placement.asset_id = asset.id.clone();
-    placement.crop = None;
-    let updated = placement.clone();
-    storage::save_board_doc(&entry.folder, &doc).map_err(e2s)?;
-    Ok(ReplaceResult { asset: if is_new { Some(asset) } else { None }, placement: updated })
+    let assets_snapshot = {
+        let doc = entry.doc.lock();
+        if !doc.placements.iter().any(|p| p.id == placement_id) {
+            return Err("placement not found".into());
+        }
+        doc.assets.clone()
+    };
+    let asset = assets::import_bytes(
+        &entry.folder,
+        &bytes,
+        &ext,
+        "crop",
+        Origin::Crop,
+        &assets_snapshot,
+    )
+    .map_err(e2s)?;
+    let (is_new, updated) = with_doc_save(&entry, |doc| {
+        let is_new = !doc.assets.iter().any(|a| a.id == asset.id);
+        if is_new {
+            doc.assets.push(asset.clone());
+        }
+        let placement = doc
+            .placements
+            .iter_mut()
+            .find(|p| p.id == placement_id)
+            .ok_or("placement not found")?;
+        placement.asset_id = asset.id.clone();
+        placement.crop = None;
+        let updated = placement.clone();
+        Ok((is_new, updated))
+    })?;
+    Ok(ReplaceResult {
+        asset: if is_new { Some(asset) } else { None },
+        placement: updated,
+    })
 }
 
 // ── Export (v0.0.2) ──────────────────────────────────────────────────────────
@@ -437,7 +504,9 @@ pub fn resolve_chat_image(
     // expansion or anything more elaborate — the AI typically emits clean
     // paths or markdown.
     let expanded: PathBuf = if let Some(stripped) = raw.strip_prefix("~/") {
-        dirs::home_dir().map(|h| h.join(stripped)).unwrap_or_else(|| PathBuf::from(raw))
+        dirs::home_dir()
+            .map(|h| h.join(stripped))
+            .unwrap_or_else(|| PathBuf::from(raw))
     } else if raw == "~" {
         dirs::home_dir().unwrap_or_else(|| PathBuf::from("~"))
     } else {
@@ -464,12 +533,18 @@ pub fn resolve_chat_image(
             workspace_rel_path: None,
             thumb_data_url: None,
             error: Some(
-                if !exists { "file not found" } else { "not an image" }.to_string(),
+                if !exists {
+                    "file not found"
+                } else {
+                    "not an image"
+                }
+                .to_string(),
             ),
         });
     }
 
-    let canonical_workspace = std::fs::canonicalize(&entry.folder).unwrap_or_else(|_| entry.folder.clone());
+    let canonical_workspace =
+        std::fs::canonicalize(&entry.folder).unwrap_or_else(|_| entry.folder.clone());
     let in_workspace = canonical.starts_with(&canonical_workspace);
     let workspace_rel_path = if in_workspace {
         canonical
@@ -487,7 +562,11 @@ pub fn resolve_chat_image(
         match build_thumb_data_url(&canonical) {
             Ok(url) => Some(url),
             Err(e) => {
-                tracing::warn!(module = "commands", "chat-image thumb gen failed for {}: {e}", canonical.display());
+                tracing::warn!(
+                    module = "commands",
+                    "chat-image thumb gen failed for {}: {e}",
+                    canonical.display()
+                );
                 None
             }
         }
@@ -508,7 +587,10 @@ pub fn resolve_chat_image(
 
 fn is_image_extension(path: &Path) -> bool {
     matches!(
-        path.extension().and_then(|s| s.to_str()).map(|s| s.to_ascii_lowercase()).as_deref(),
+        path.extension()
+            .and_then(|s| s.to_str())
+            .map(|s| s.to_ascii_lowercase())
+            .as_deref(),
         Some("png" | "jpg" | "jpeg" | "webp" | "gif" | "bmp" | "tif" | "tiff" | "avif")
     )
 }
@@ -541,7 +623,8 @@ pub fn import_chat_image_to_canvas(
         return Err(format!("not a file: {abs_path}"));
     }
 
-    let canonical_workspace = std::fs::canonicalize(&entry.folder).unwrap_or_else(|_| entry.folder.clone());
+    let canonical_workspace =
+        std::fs::canonicalize(&entry.folder).unwrap_or_else(|_| entry.folder.clone());
     let canonical_src = std::fs::canonicalize(&src).unwrap_or(src.clone());
     let in_workspace = canonical_src.starts_with(&canonical_workspace);
 
@@ -566,25 +649,26 @@ pub fn import_chat_image_to_canvas(
         target
     };
 
-    let mut doc = entry.doc.lock();
-    let mut out = ImportResult {
-        assets: Vec::new(),
-        placements: Vec::new(),
-    };
-    let asset = assets::import_external(&entry.folder, &staged_src, &doc.assets)
+    let assets_snapshot = entry.doc.lock().assets.clone();
+    let asset = assets::import_external(&entry.folder, &staged_src, &assets_snapshot)
         .map_err(|e| format!("import failed: {e}"))?;
-    if !doc.assets.iter().any(|a| a.id == asset.id) {
-        doc.assets.push(asset.clone());
-        out.assets.push(asset.clone());
-    }
-    let centers = board::flow_layout(board::next_batch_top(&doc), &[board::footprint(&asset)]);
-    let (x, y) = centers[0];
-    let placement = board::make_placement(&asset, x, y, doc.placements.len() as i64, None);
-    doc.placements.push(placement.clone());
-    out.placements.push(placement);
 
-    storage::save_board_doc(&entry.folder, &doc).map_err(e2s)?;
-    Ok(out)
+    with_doc_save(&entry, |doc| {
+        let mut out = ImportResult {
+            assets: Vec::new(),
+            placements: Vec::new(),
+        };
+        if !doc.assets.iter().any(|a| a.id == asset.id) {
+            doc.assets.push(asset.clone());
+            out.assets.push(asset.clone());
+        }
+        let centers = board::flow_layout(board::next_batch_top(&doc), &[board::footprint(&asset)]);
+        let (x, y) = centers[0];
+        let placement = board::make_placement(&asset, x, y, doc.placements.len() as i64, None);
+        doc.placements.push(placement.clone());
+        out.placements.push(placement);
+        Ok(out)
+    })
 }
 
 /// Resolve a target filename inside `imports_dir` that:
@@ -592,7 +676,11 @@ pub fn import_chat_image_to_canvas(
 ///     same bytes as `src` (idempotent re-import of the same chat reference),
 ///   • otherwise appends a 6-char content-hash suffix so two DIFFERENT files
 ///     with the same basename don't clobber each other.
-fn uniqueify_import_name(imports_dir: &Path, original_name: &str, src: &Path) -> Result<String, String> {
+fn uniqueify_import_name(
+    imports_dir: &Path,
+    original_name: &str,
+    src: &Path,
+) -> Result<String, String> {
     let target = imports_dir.join(original_name);
     if !target.exists() {
         return Ok(original_name.to_string());
@@ -602,8 +690,14 @@ fn uniqueify_import_name(imports_dir: &Path, original_name: &str, src: &Path) ->
             return Ok(original_name.to_string()); // same content — reuse
         }
     }
-    let stem = Path::new(original_name).file_stem().and_then(|s| s.to_str()).unwrap_or("imported");
-    let ext = Path::new(original_name).extension().and_then(|s| s.to_str()).unwrap_or("png");
+    let stem = Path::new(original_name)
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or("imported");
+    let ext = Path::new(original_name)
+        .extension()
+        .and_then(|s| s.to_str())
+        .unwrap_or("png");
     let bytes = std::fs::read(src).map_err(|e| e.to_string())?;
     let hash = blake3::hash(&bytes);
     let short: String = hash.to_hex().chars().take(6).collect();
@@ -685,7 +779,10 @@ pub async fn send_message(
     overlays: Vec<OverlayRef>,
     codex: State<'_, Arc<CodexRegistry>>,
 ) -> Result<(), String> {
-    let ov = overlays.into_iter().map(|o| (o.placement_id, o.path)).collect();
+    let ov = overlays
+        .into_iter()
+        .map(|o| (o.placement_id, o.path))
+        .collect();
     codex::send_message(codex.inner().clone(), board_id, text, sources, ov).await
 }
 
@@ -698,13 +795,16 @@ pub fn set_annotation(
     registry: State<Arc<BoardRegistry>>,
 ) -> Result<(), String> {
     let entry = registry.get(&board_id).ok_or("unknown board")?;
-    let mut doc = entry.doc.lock();
-    doc.annotations.retain(|a| a.placement_id != placement_id);
-    if !shapes.is_empty() {
-        doc.annotations.push(Annotation { placement_id, shapes });
-    }
-    storage::save_board_doc(&entry.folder, &doc).map_err(e2s)?;
-    Ok(())
+    with_doc_save(&entry, |doc| {
+        doc.annotations.retain(|a| a.placement_id != placement_id);
+        if !shapes.is_empty() {
+            doc.annotations.push(Annotation {
+                placement_id,
+                shapes,
+            });
+        }
+        Ok(())
+    })
 }
 
 /// Rename the file backing a Placement's Asset on disk, keeping the extension
@@ -718,23 +818,29 @@ pub fn rename_asset(
     registry: State<Arc<BoardRegistry>>,
 ) -> Result<String, String> {
     let entry = registry.get(&board_id).ok_or("unknown board")?;
-    let mut doc = entry.doc.lock();
-
-    let asset_id = doc
-        .placements
-        .iter()
-        .find(|p| p.id == placement_id)
-        .map(|p| p.asset_id.clone())
-        .ok_or("placement not found")?;
-    let old_path = doc
-        .assets
-        .iter()
-        .find(|a| a.id == asset_id)
-        .map(|a| a.path.clone())
-        .ok_or("asset not found")?;
+    let _save = entry.save.lock();
+    let old_path = {
+        let doc = entry.doc.lock();
+        let asset_id = doc
+            .placements
+            .iter()
+            .find(|p| p.id == placement_id)
+            .map(|p| p.asset_id.clone())
+            .ok_or("placement not found")?;
+        doc.assets
+            .iter()
+            .find(|a| a.id == asset_id)
+            .map(|a| a.path.clone())
+            .ok_or("asset not found")?
+    };
 
     // Sanitize: basename only, no path separators or leading dots.
-    let raw = new_name.trim().rsplit(['/', '\\']).next().unwrap_or("").trim();
+    let raw = new_name
+        .trim()
+        .rsplit(['/', '\\'])
+        .next()
+        .unwrap_or("")
+        .trim();
     let raw = raw.trim_start_matches('.').trim();
     if raw.is_empty() {
         return Err("empty name".into());
@@ -756,8 +862,16 @@ pub fn rename_asset(
     let folder = &entry.folder;
     if folder.join(&desired).exists() {
         let path = std::path::Path::new(&desired);
-        let stem = path.file_stem().and_then(|s| s.to_str()).unwrap_or("image").to_string();
-        let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("").to_string();
+        let stem = path
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .unwrap_or("image")
+            .to_string();
+        let ext = path
+            .extension()
+            .and_then(|e| e.to_str())
+            .unwrap_or("")
+            .to_string();
         let mut i = 1;
         loop {
             let cand = if ext.is_empty() {
@@ -774,12 +888,16 @@ pub fn rename_asset(
     }
 
     std::fs::rename(folder.join(&old_path), folder.join(&desired)).map_err(e2s)?;
-    for a in doc.assets.iter_mut() {
-        if a.path == old_path {
-            a.path = desired.clone();
+    let doc_clone = {
+        let mut doc = entry.doc.lock();
+        for a in doc.assets.iter_mut() {
+            if a.path == old_path {
+                a.path = desired.clone();
+            }
         }
-    }
-    storage::save_board_doc(folder, &doc).map_err(e2s)?;
+        doc.clone()
+    };
+    storage::save_board_doc(folder, &doc_clone).map_err(e2s)?;
     Ok(desired)
 }
 
@@ -838,14 +956,20 @@ pub async fn stop_session(
 
 /// All sessions for a Board + the active one.
 #[tauri::command]
-pub fn list_sessions(board_id: String, registry: State<Arc<BoardRegistry>>) -> Result<SessionsDoc, String> {
+pub fn list_sessions(
+    board_id: String,
+    registry: State<Arc<BoardRegistry>>,
+) -> Result<SessionsDoc, String> {
     let folder = registry.folder(&board_id).ok_or("unknown board")?;
     Ok(session::load(&folder))
 }
 
 /// Start a fresh conversation (new thread); returns its session id.
 #[tauri::command]
-pub async fn new_session(board_id: String, codex: State<'_, Arc<CodexRegistry>>) -> Result<String, String> {
+pub async fn new_session(
+    board_id: String,
+    codex: State<'_, Arc<CodexRegistry>>,
+) -> Result<String, String> {
     codex::new_session(codex.inner().clone(), board_id).await
 }
 

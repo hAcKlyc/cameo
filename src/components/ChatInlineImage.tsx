@@ -148,8 +148,10 @@ function ChatImageMenu({ x, y, onClose, absPath, inWorkspace, addedPlacementId, 
       const result = await ipc.importChatImageToCanvas(boardId, absPath);
       // Update the canvas store so the new placement renders. Mirrors the
       // pattern in board.ts addPlacements / addAssets after import_paths.
+      // `assets` is intentionally empty when content-addressed import dedupes;
+      // a new placement is still the thing the canvas must merge.
       const placement = result.placements[0];
-      if (placement && result.assets[0]) {
+      if (placement) {
         useBoardStore.getState().applyImportResult(result);
         onAddedPlacement(placement.id);
       }

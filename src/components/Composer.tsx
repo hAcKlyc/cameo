@@ -17,6 +17,10 @@ function stem(path: string): string {
 
 const IMAGE_EXTS = ["png", "jpg", "jpeg", "webp", "gif", "bmp", "tif", "tiff", "avif"];
 
+function sendErrorMessage(e: unknown): string {
+  return `Could not send this turn: ${e instanceof Error ? e.message : String(e)}`;
+}
+
 /**
  * Lovart-style reference composer. References live INLINE in the text as atomic
  * pills (PRD §6.3):
@@ -300,14 +304,20 @@ export function Composer() {
     const notes = buildMarkNotes(allRefs);
     const instruction = [notes, text].filter((s) => s.trim()).join("\n\n");
     if (!instruction.trim() && allRefs.length === 0) return;
-    useChatStore.getState().startTurn(instruction, allRefs);
+    const turn = useChatStore.getState().startTurn(instruction, allRefs);
     clearEditor();
-    void buildOverlays(boardId, allRefs).then((overlays) =>
-      // Consume marks only after the turn was actually sent (not on failure).
-      ipc.sendMessage(boardId, instruction, allRefs, overlays).then(() =>
-        useBoardStore.getState().consumeMarks(allRefs)
-      )
-    );
+    void (async () => {
+      try {
+        const overlays = await buildOverlays(boardId, allRefs);
+        await ipc.sendMessage(boardId, instruction, allRefs, overlays);
+        // Consume marks only after the turn was actually sent (not on failure).
+        useBoardStore.getState().consumeMarks(allRefs);
+      } catch (e) {
+        const message = sendErrorMessage(e);
+        useChatStore.getState().failTurn(message, turn);
+        void ipc.frontLog("error", message).catch(() => {});
+      }
+    })();
     // A still-selected canvas image re-shows its ghost for the next turn.
     syncGhosts([...useBoardStore.getState().selection]);
   };

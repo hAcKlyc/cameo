@@ -23,10 +23,18 @@ export function imageName(pid: string): string {
 export function runImagePreset(boardId: string, pid: string, presetPrompt: string): void {
   const notes = buildMarkNotes([pid]);
   const instruction = [notes, presetPrompt].filter((s) => s.trim()).join("\n\n");
-  useChatStore.getState().startTurn(instruction, [pid]);
-  void buildOverlays(boardId, [pid]).then((ov) =>
-    ipc.sendMessage(boardId, instruction, [pid], ov).then(() => useBoardStore.getState().consumeMarks([pid]))
-  );
+  const turn = useChatStore.getState().startTurn(instruction, [pid]);
+  void (async () => {
+    try {
+      const ov = await buildOverlays(boardId, [pid]);
+      await ipc.sendMessage(boardId, instruction, [pid], ov);
+      useBoardStore.getState().consumeMarks([pid]);
+    } catch (e) {
+      const message = `Could not send this preset: ${e instanceof Error ? e.message : String(e)}`;
+      useChatStore.getState().failTurn(message, turn);
+      void ipc.frontLog("error", message).catch(() => {});
+    }
+  })();
 }
 
 /** Export one image via a native save dialog. */

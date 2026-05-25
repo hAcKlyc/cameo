@@ -38,11 +38,6 @@ export function GalleryOverlay({ onClose }: { onClose: () => void }) {
   const t = useT();
 
   const [items, setItems] = useState<GalleryItem[]>([]);
-  const [offset, setOffset] = useState(0);
-  // `hasMore` replaces a prior `total`-driven terminus. We set it false when
-  // a page returns fewer than PAGE items — letting the worker drop its
-  // COUNT(*) query (~100 ms saved per /items hit).
-  const [hasMore, setHasMore] = useState(true);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<ErrCode | null>(null);
 
@@ -58,6 +53,10 @@ export function GalleryOverlay({ onClose }: { onClose: () => void }) {
   // page loads + filter changes pass it back so the order stays consistent
   // for the lifetime of one overlay open (closing and reopening picks fresh).
   const bucketRef = useRef<number | undefined>(undefined);
+  const inFlightRef = useRef(false);
+  const offsetRef = useRef(0);
+  const hasMoreRef = useRef(true);
+  const errorRef = useRef<ErrCode | null>(null);
 
   const sentinelRef = useRef<HTMLDivElement>(null);
 
@@ -82,9 +81,11 @@ export function GalleryOverlay({ onClose }: { onClose: () => void }) {
   // and prevents wasted bandwidth on slow connections.
   useEffect(() => {
     const ctrl = new AbortController();
+    inFlightRef.current = true;
+    offsetRef.current = 0;
+    hasMoreRef.current = true;
+    errorRef.current = null;
     setItems([]);
-    setOffset(0);
-    setHasMore(true);
     setError(null);
     setLoading(true);
     void (async () => {
@@ -96,35 +97,52 @@ export function GalleryOverlay({ onClose }: { onClose: () => void }) {
         if (ctrl.signal.aborted) return;
         if (bucketRef.current === undefined) bucketRef.current = r.bucket;
         setItems(r.items);
-        setOffset(r.items.length);
-        if (r.items.length < PAGE) setHasMore(false);
+        offsetRef.current = r.items.length;
+        const more = r.items.length >= PAGE;
+        hasMoreRef.current = more;
       } catch (e) {
         if (ctrl.signal.aborted || (e as Error).name === "AbortError") return;
-        setError(mapError(e));
+        const mapped = mapError(e);
+        errorRef.current = mapped;
+        setError(mapped);
       } finally {
-        if (!ctrl.signal.aborted) setLoading(false);
+        if (!ctrl.signal.aborted) {
+          inFlightRef.current = false;
+          setLoading(false);
+        }
       }
     })();
-    return () => ctrl.abort();
+    return () => {
+      ctrl.abort();
+      inFlightRef.current = false;
+    };
   }, [queryKey, useCase]);
 
   const loadMore = useCallback(async () => {
-    if (loading || error || !hasMore) return;
+    if (inFlightRef.current || errorRef.current || !hasMoreRef.current) return;
+    inFlightRef.current = true;
     setLoading(true);
     try {
-      const params: Record<string, string | number> = { limit: PAGE, offset };
+      const pageOffset = offsetRef.current;
+      const params: Record<string, string | number> = { limit: PAGE, offset: pageOffset };
       if (useCase) params.use_case = useCase;
       if (bucketRef.current !== undefined) params._b = bucketRef.current;
       const r = await fetchItems(params);
       setItems((prev) => [...prev, ...r.items]);
-      setOffset(offset + r.items.length);
-      if (r.items.length < PAGE) setHasMore(false);
+      const nextOffset = pageOffset + r.items.length;
+      offsetRef.current = nextOffset;
+      if (r.items.length < PAGE) {
+        hasMoreRef.current = false;
+      }
     } catch (e) {
-      setError(mapError(e));
+      const mapped = mapError(e);
+      errorRef.current = mapped;
+      setError(mapped);
     } finally {
+      inFlightRef.current = false;
       setLoading(false);
     }
-  }, [loading, error, hasMore, offset, useCase]);
+  }, [useCase]);
 
   // Infinite scroll: observe the sentinel at the bottom.
   useEffect(() => {
