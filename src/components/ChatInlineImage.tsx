@@ -23,16 +23,31 @@ export function ChatInlineImage({ path }: { path: string }) {
   const resolution = useChatStore((s) => s.imageResolutions.get(path));
   const resolveChatImage = useChatStore((s) => s.resolveChatImage);
   const [menu, setMenu] = useState<{ x: number; y: number } | null>(null);
+  const missingRetries = useRef(0);
   // After "添加到画布" succeeds we want this card to behave like the canvas
   // variant — store the new placement id locally (chat store's resolution
   // map only tracks Rust's read-only classification).
   const [addedPlacementId, setAddedPlacementId] = useState<string | null>(null);
 
-  // Kick the resolver on mount and any time the path changes (we never
-  // resolve twice — `resolveChatImage` short-circuits on cached entries).
   useEffect(() => {
-    resolveChatImage(path);
-  }, [path, resolveChatImage]);
+    missingRetries.current = 0;
+  }, [path]);
+
+  // Kick the resolver on mount and retry a few times after "missing" because
+  // streamed model text can mention a file before the producing tool has
+  // flushed it to disk. `resolveChatImage` still short-circuits pending/resolved.
+  useEffect(() => {
+    if (resolution === undefined) {
+      resolveChatImage(path);
+      return;
+    }
+    if (resolution !== "missing" || missingRetries.current >= 4) return;
+    const timer = window.setTimeout(() => {
+      missingRetries.current += 1;
+      resolveChatImage(path);
+    }, 1_200);
+    return () => window.clearTimeout(timer);
+  }, [path, resolution, resolveChatImage]);
 
   const onContext = (e: React.MouseEvent) => {
     e.preventDefault();

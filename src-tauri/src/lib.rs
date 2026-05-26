@@ -15,6 +15,7 @@ pub mod logging;
 pub mod updater;
 pub mod model;
 pub mod paths;
+pub mod process;
 pub mod prompt;
 pub mod protocol;
 pub mod proxy;

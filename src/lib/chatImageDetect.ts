@@ -10,11 +10,10 @@
  *     leak as raw text around the inline thumbnail). Closing `)` required so
  *     mid-stream partials like `[foo](./bar.` never half-render (Q5).
  *
- *   • **Plain path**: any whitespace-bounded token containing at least one `/`
- *     and ending in a known image extension. The `/` requirement keeps us
- *     out of false positives where the model casually mentions filenames
- *     ("you can save this to output.png") — those bare filenames are not
- *     recognised. Markdown is more permissive (any path shape inside `()`).
+ *   • **Plain path**: any whitespace-bounded token ending in a known image
+ *     extension, including Windows absolute paths (`C:\...\x.png`),
+ *     slash/backslash relative paths, and bare workspace filenames. The Rust
+ *     resolver decides whether the file actually exists in the Board folder.
  *
  * Returns ordered, non-overlapping ranges into the source string so callers
  * can slice the original text and render each segment as either plain text
@@ -46,12 +45,13 @@ const MD_RE = new RegExp(
   "gi",
 );
 
-// Plain path token: must contain `/`, end in image ext. Whitespace-bounded so
-// punctuation inside path components doesn't bleed in. The leading lookbehind
-// (^|\s|[`"']) and trailing lookahead allow common surroundings (backticks,
-// quotes, commas) without consuming them as part of the path.
+const PATH_BODY = String.raw`[^\s\`"'()<>，。！？；：、]`;
+
+// Plain path token: accepts Windows `C:\...`, slash/backslash paths, and bare
+// workspace filenames. Capture the leading boundary instead of using lookbehind
+// so start/end offsets stay explicit and robust across webviews.
 const PLAIN_RE = new RegExp(
-  String.raw`(?<=^|[\s\`"'(])([^\s\`"'()<>]*\/[^\s\`"'()<>]*\.${IMAGE_EXTS})(?=[\s\`"'),.!?:;]|$)`,
+  String.raw`(^|[\s\`"'(（])((?:[A-Za-z]:[\\/]|~[\\/]|\.{1,2}[\\/]|${PATH_BODY}*[\\/])?${PATH_BODY}*\.${IMAGE_EXTS})(?=[\s\`"'),.!?:;，。！？；：、）\]]|$)`,
   "gi",
 );
 
@@ -73,11 +73,11 @@ export function extractImageRefs(text: string): ImageRef[] {
 
   // Plain — skip anything overlapping a markdown match.
   for (const m of text.matchAll(PLAIN_RE)) {
-    const idx = m.index ?? 0;
+    const idx = (m.index ?? 0) + m[1].length;
     const start = idx;
-    const end = start + m[1].length;
+    const end = start + m[2].length;
     if (refs.some((r) => r.kind === "markdown" && start < r.end && end > r.start)) continue;
-    refs.push({ start, end, kind: "plain", path: m[1] });
+    refs.push({ start, end, kind: "plain", path: m[2] });
   }
 
   refs.sort((a, b) => a.start - b.start);

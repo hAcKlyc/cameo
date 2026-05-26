@@ -12,7 +12,7 @@ use crate::workspace::{self, WorkspaceEntry};
 use crate::{assets, storage};
 use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 use std::sync::Arc;
 use tauri::{AppHandle, State};
 
@@ -457,11 +457,11 @@ pub fn copy_image(
 
 // ── Chat-text-embedded image references ─────────────────────────────────────
 //
-// When the AI's reply mentions a path (markdown `![](path)` or a bare token
-// with `/` ending in an image extension), three commands cooperate to render
-// + canvas-import + clipboard / reveal it. See src/lib/chatImageDetect.ts
-// for the path-extraction regex and src/components/ChatInlineImage.tsx for
-// the UI side.
+// When the AI's reply mentions an image path (markdown, Windows absolute path,
+// slash/backslash relative path, or a bare workspace filename), these commands
+// cooperate to render + canvas-import + clipboard / reveal it. See
+// src/lib/chatImageDetect.ts for the path-extraction regex and
+// src/components/ChatInlineImage.tsx for the UI side.
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -498,19 +498,21 @@ pub fn resolve_chat_image(
     registry: State<Arc<BoardRegistry>>,
 ) -> Result<ChatImageResolution, String> {
     let entry = registry.get(&board_id).ok_or("unknown board")?;
-    let raw = raw_path.trim();
+    let raw = normalize_chat_path_raw(&raw_path);
 
-    // Expand a leading `~/` against the user's home dir. We DON'T do `$HOME`
-    // expansion or anything more elaborate — the AI typically emits clean
-    // paths or markdown.
-    let expanded: PathBuf = if let Some(stripped) = raw.strip_prefix("~/") {
+    // Expand a leading `~/` or `~\` against the user's home dir. We DON'T do
+    // `$HOME` expansion or anything more elaborate — the AI typically emits
+    // clean paths or markdown.
+    let expanded: PathBuf = if let Some(file_url) = file_url_to_path(&raw) {
+        file_url
+    } else if let Some(stripped) = raw.strip_prefix("~/").or_else(|| raw.strip_prefix("~\\")) {
         dirs::home_dir()
             .map(|h| h.join(stripped))
-            .unwrap_or_else(|| PathBuf::from(raw))
+            .unwrap_or_else(|| PathBuf::from(&raw))
     } else if raw == "~" {
         dirs::home_dir().unwrap_or_else(|| PathBuf::from("~"))
     } else {
-        PathBuf::from(raw)
+        PathBuf::from(&raw)
     };
 
     // Relative paths resolve against the workspace folder.
@@ -550,7 +552,7 @@ pub fn resolve_chat_image(
         canonical
             .strip_prefix(&canonical_workspace)
             .ok()
-            .map(|p| p.to_string_lossy().to_string())
+            .map(path_to_url_rel)
     } else {
         None
     };
@@ -585,6 +587,59 @@ pub fn resolve_chat_image(
     })
 }
 
+fn normalize_chat_path_raw(raw: &str) -> String {
+    raw.trim()
+        .trim_matches(|c| matches!(c, '`' | '"' | '\'' | '<' | '>'))
+        .to_string()
+}
+
+fn file_url_to_path(raw: &str) -> Option<PathBuf> {
+    if !raw
+        .get(..7)
+        .is_some_and(|p| p.eq_ignore_ascii_case("file://"))
+    {
+        return None;
+    }
+    let mut rest = raw[7..].to_string();
+    if let Some(local) = rest
+        .strip_prefix("localhost/")
+        .or_else(|| rest.strip_prefix("localhost\\"))
+    {
+        rest = format!("/{local}");
+    }
+    let decoded = urlencoding::decode(&rest)
+        .map(|c| c.into_owned())
+        .unwrap_or(rest);
+
+    #[cfg(windows)]
+    {
+        let path = if decoded.len() >= 3 {
+            let bytes = decoded.as_bytes();
+            if bytes[0] == b'/' && bytes[2] == b':' && bytes[1].is_ascii_alphabetic() {
+                &decoded[1..]
+            } else {
+                decoded.as_str()
+            }
+        } else {
+            decoded.as_str()
+        };
+        return Some(PathBuf::from(path));
+    }
+
+    #[cfg(not(windows))]
+    Some(PathBuf::from(decoded))
+}
+
+fn path_to_url_rel(path: &Path) -> String {
+    let mut parts = Vec::new();
+    for comp in path.components() {
+        if let Component::Normal(part) = comp {
+            parts.push(part.to_string_lossy());
+        }
+    }
+    parts.join("/")
+}
+
 fn is_image_extension(path: &Path) -> bool {
     matches!(
         path.extension()
@@ -604,6 +659,32 @@ fn build_thumb_data_url(path: &Path) -> anyhow::Result<String> {
     thumb.write_to(&mut buf, image::ImageFormat::Jpeg)?;
     let encoded = base64::engine::general_purpose::STANDARD.encode(buf.into_inner());
     Ok(format!("data:image/jpeg;base64,{}", encoded))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{file_url_to_path, normalize_chat_path_raw, path_to_url_rel};
+    use std::path::Path;
+
+    #[test]
+    fn chat_path_normalization_trims_common_wrappers() {
+        assert_eq!(
+            normalize_chat_path_raw("  `cute-tiger.png`  "),
+            "cute-tiger.png"
+        );
+    }
+
+    #[test]
+    fn file_url_decodes_percent_escapes() {
+        let path = file_url_to_path("file:///tmp/cute%20tiger.png").unwrap();
+        assert!(path.to_string_lossy().contains("cute tiger.png"));
+    }
+
+    #[test]
+    fn workspace_relative_paths_are_url_slash_separated() {
+        let rel = Path::new("imports").join("cute-tiger.png");
+        assert_eq!(path_to_url_rel(&rel), "imports/cute-tiger.png");
+    }
 }
 
 /// User-initiated "add to canvas" from the chat-image right-click menu.

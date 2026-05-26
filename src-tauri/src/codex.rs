@@ -190,7 +190,9 @@ fn detect_shell_path() -> Option<String> {
             let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/zsh".to_string());
             let marker = format!("__CAMEO_PATH_{}__", std::process::id());
             let script = format!("echo \"{marker}${{PATH}}{marker}\"");
-            let mut child = match std::process::Command::new(shell)
+            let mut cmd = std::process::Command::new(shell);
+            crate::process::hide_console_window(&mut cmd);
+            let mut child = match cmd
                 .args(["-i", "-l", "-c", &script])
                 .stdin(Stdio::null())
                 .stdout(Stdio::piped())
@@ -289,6 +291,7 @@ pub fn detect() -> CodexInfo {
     match resolve_codex() {
         Ok(resolved) => {
             let mut cmd = std::process::Command::new(&resolved.path);
+            crate::process::hide_console_window(&mut cmd);
             cmd.arg("--version")
                 .env("PATH", &resolved.search_path)
                 .stdin(Stdio::null())
@@ -526,6 +529,7 @@ pub async fn start_session(
     let codex = resolve_codex()?;
 
     let mut cmd = tokio::process::Command::new(&codex.path);
+    crate::process::hide_tokio_console_window(&mut cmd);
     cmd.arg("app-server")
         .current_dir(&folder)
         .env("PATH", &codex.search_path)
@@ -931,7 +935,9 @@ fn kill_tree(pid: u32, _sig: i32) {
     if pid == 0 {
         return;
     }
-    let _ = std::process::Command::new("taskkill")
+    let mut cmd = std::process::Command::new("taskkill");
+    crate::process::hide_console_window(&mut cmd);
+    let _ = cmd
         .args(["/PID", &pid.to_string(), "/T", "/F"])
         .stdout(Stdio::null())
         .stderr(Stdio::null())

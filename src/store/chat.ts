@@ -723,7 +723,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
 
   resolveChatImage: (path: string) => {
     const existing = get().imageResolutions.get(path);
-    if (existing !== undefined) return; // pending OR settled — never re-resolve
+    if (existing !== undefined && existing !== "missing") return; // pending OR resolved — don't duplicate
     const boardId = useBoardStore.getState().boardId;
     if (!boardId) return;
 

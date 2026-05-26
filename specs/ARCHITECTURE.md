@@ -60,7 +60,7 @@ Cameo 是一个**桌面 app**（Tauri 2 + React + PixiJS），把 OpenAI 的 **C
 | 桌面壳 | **Tauri 2** | 轻、Rust 后端、原生菜单/托盘/更新器都有，跨 mac/win 一份代码 |
 | UI chrome | **React 19** + Zustand v5 | 团队熟、生态全；状态库选 Zustand 是因为不想要 Redux 模板 |
 | 画布渲染 | **PixiJS v8**（WebGL2 基线，WebGPU 自动启用）| 不选 Vello（alpha + 大图弱）、egui（大图卡）、GPUI（单公司）|
-| 图片协议 | 自定义 `cameo://` URI | 路径规范化 + 防穿越；Rust 解码 / 降采样 / mipmap |
+| 图片协议 | 自定义 `cameo://localhost/<boardId>/…` URI | boardId 放 path（兼容 Windows WebView2 的 `http://cameo.localhost/…` 形态）+ 路径规范化 + 防穿越 |
 | Agent | **Codex `app-server`**（JSON-RPC over stdio）| 长驻进程 = stateful session，跟"每轮 respawn"完全不同 |
 | 鉴权 | `~/.codex` ChatGPT 订阅 | **无 API key**；Cameo 不接 OpenAI，能力来自用户已付费的 Codex |
 | 国际化 | 自研 `i18n/messages.ts`（key catalog）| 简单到不需要 i18next；en 是 source of truth |
@@ -144,6 +144,7 @@ Cameo 是一个**桌面 app**（Tauri 2 + React + PixiJS），把 OpenAI 的 **C
 | 文件 | 行数 | 职责 |
 |---|---:|---|
 | `codex.rs` | 1044 | **核心**：spawn `codex app-server` → JSON-RPC `initialize` / `thread/start` / `turn/start` → drain items → 转 `UnifiedEvent` |
+| `process.rs` | 31 | 子进程小工具；Windows 下给 Codex / taskkill 等 console 子进程加 `CREATE_NO_WINDOW` |
 | `runtime.rs` | 89 | runtime-agnostic 事件枚举：`UnifiedEvent`（SessionInit / TextDelta / Thinking* / Tool* / GenerationStarted / ImageGenerated / TurnComplete / RateLimits / …）|
 | `prompt.rs` | 32 | 系统提示 + 引用图块格式 |
 
@@ -151,7 +152,7 @@ Cameo 是一个**桌面 app**（Tauri 2 + React + PixiJS），把 OpenAI 的 **C
 | 文件 | 行数 | 职责 |
 |---|---:|---|
 | `assets.rs` | 184 | Asset 内容寻址（blake3）+ 缩略图生成（image crate → JPEG）|
-| `protocol.rs` | 82 | `cameo://` URI 处理：从 BoardRegistry 路由到磁盘文件，做路径规范化 / 防穿越 |
+| `protocol.rs` | 82 | `cameo://` URI 处理：从 BoardRegistry 路由到磁盘文件，兼容 Windows WebView2 host 变形，做路径规范化 / 防穿越 |
 | `paths.rs` | 100 | 文件系统布局：全局 `~/.cameo/` + 每 Board `.cameo/`，`CAMEO_HOME` 可覆盖（测试/便携）|
 
 **系统服务**

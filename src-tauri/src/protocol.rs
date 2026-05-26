@@ -1,4 +1,4 @@
-//! `cameo://<boardId>/<rel-path>` — serves image bytes from a Board folder.
+//! `cameo://localhost/<boardId>/<rel-path>` — serves image bytes from a Board folder.
 //!
 //! Path canonicalization + traversal guard ported from Riff's `riff://` scheme:
 //! reject `..`/absolute components, then verify the canonical path stays inside
@@ -7,8 +7,40 @@
 use crate::board::BoardRegistry;
 use std::path::{Component, PathBuf};
 use std::sync::Arc;
-use tauri::http::{header, Request, Response, StatusCode};
+use tauri::http::{header, Request, Response, StatusCode, Uri};
 use tauri::{Manager, UriSchemeContext};
+
+fn parse_cameo_uri(uri: &Uri) -> Result<(String, String), (StatusCode, &'static str)> {
+    let host = uri.host().unwrap_or_default();
+    let path = uri.path().trim_start_matches('/');
+
+    // Tauri/WebView2 represents custom protocols as `http://<scheme>.localhost/...`
+    // on Windows. Keep board routing in the path and only support host-as-board
+    // for legacy `cameo://<boardId>/<rel-path>` URLs used before this fix.
+    if !host.is_empty() && host != "localhost" && !host.ends_with(".localhost") {
+        if path.is_empty() {
+            return Err((
+                StatusCode::BAD_REQUEST,
+                "missing image path in cameo:// URL",
+            ));
+        }
+        return Ok((host.to_string(), path.to_string()));
+    }
+
+    let Some((board_raw, rel_raw)) = path.split_once('/') else {
+        return Err((StatusCode::BAD_REQUEST, "missing boardId in cameo:// URL"));
+    };
+    if board_raw.is_empty() || rel_raw.is_empty() {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "missing boardId or image path in cameo:// URL",
+        ));
+    }
+    let board_id = urlencoding::decode(board_raw)
+        .map(|c| c.into_owned())
+        .unwrap_or_else(|_| board_raw.to_string());
+    Ok((board_id, rel_raw.to_string()))
+}
 
 pub fn handle_cameo_uri<R: tauri::Runtime>(
     ctx: UriSchemeContext<'_, R>,
@@ -16,9 +48,9 @@ pub fn handle_cameo_uri<R: tauri::Runtime>(
 ) -> Response<Vec<u8>> {
     let uri = request.uri();
 
-    let board_id = match uri.host() {
-        Some(h) if !h.is_empty() => h.to_string(),
-        _ => return error_response(StatusCode::BAD_REQUEST, "missing boardId in cameo:// URL"),
+    let (board_id, rel_raw) = match parse_cameo_uri(uri) {
+        Ok(parsed) => parsed,
+        Err((code, msg)) => return error_response(code, msg),
     };
 
     let app = ctx.app_handle();
@@ -28,8 +60,7 @@ pub fn handle_cameo_uri<R: tauri::Runtime>(
         None => return error_response(StatusCode::NOT_FOUND, "unknown board"),
     };
 
-    let rel_raw = uri.path().trim_start_matches('/');
-    let rel = urlencoding::decode(rel_raw)
+    let rel = urlencoding::decode(&rel_raw)
         .map(|c| c.into_owned())
         .unwrap_or_else(|_| rel_raw.to_string());
 
@@ -79,4 +110,38 @@ fn error_response(code: StatusCode, msg: &str) -> Response<Vec<u8>> {
         .header("Access-Control-Allow-Origin", "*")
         .body(msg.as_bytes().to_vec())
         .unwrap()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::parse_cameo_uri;
+    use tauri::http::Uri;
+
+    #[test]
+    fn parses_path_scoped_cameo_url() {
+        let uri: Uri = "cameo://localhost/board-1/gen-20260526.png"
+            .parse()
+            .unwrap();
+        let (board, rel) = parse_cameo_uri(&uri).unwrap();
+        assert_eq!(board, "board-1");
+        assert_eq!(rel, "gen-20260526.png");
+    }
+
+    #[test]
+    fn parses_windows_webview2_custom_protocol_shape() {
+        let uri: Uri = "http://cameo.localhost/board-1/gen-20260526.png"
+            .parse()
+            .unwrap();
+        let (board, rel) = parse_cameo_uri(&uri).unwrap();
+        assert_eq!(board, "board-1");
+        assert_eq!(rel, "gen-20260526.png");
+    }
+
+    #[test]
+    fn keeps_legacy_host_scoped_urls_working() {
+        let uri: Uri = "cameo://board-1/gen-20260526.png".parse().unwrap();
+        let (board, rel) = parse_cameo_uri(&uri).unwrap();
+        assert_eq!(board, "board-1");
+        assert_eq!(rel, "gen-20260526.png");
+    }
 }

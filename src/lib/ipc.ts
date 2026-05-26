@@ -139,11 +139,18 @@ export interface ChatImageResolution {
   error: string | null;
 }
 
-/** Build a `cameo://<boardId>/<encoded path>` URL for a texture fetch. */
+/** Build a cross-platform `cameo://` URL for a texture fetch.
+ *
+ * Board id lives in the path, not the host: WebView2 represents custom
+ * protocols as `http://<scheme>.localhost/...`, so host-based routing breaks
+ * on Windows. Relative paths are slash-normalized before per-segment encoding.
+ */
 export function cameoUrl(boardId: string, relPath: string): string {
-  const enc = relPath
+  const encBoard = encodeURIComponent(boardId);
+  const normalized = relPath.replace(/\\/g, "/").replace(/^\/+/, "");
+  const enc = normalized
     .split("/")
     .map((seg) => encodeURIComponent(seg))
     .join("/");
-  return `cameo://${boardId}/${enc}`;
+  return `cameo://localhost/${encBoard}/${enc}`;
 }
