@@ -147,6 +147,9 @@ else { Warn "no Windows code-signing configured - installer will be UNSIGNED (Sm
 
 # -- Tauri update signing key (for auto-update payload signatures) ----------
 if ($env:TAURI_SIGNING_PRIVATE_KEY) {
+  if ($null -eq [Environment]::GetEnvironmentVariable('TAURI_SIGNING_PRIVATE_KEY_PASSWORD', 'Process')) {
+    [Environment]::SetEnvironmentVariable('TAURI_SIGNING_PRIVATE_KEY_PASSWORD', '', 'Process')
+  }
   Ok "tauri update signing key present - .nsis.zip.sig will be generated for auto-update"
 } else {
   Warn "no TAURI_SIGNING_PRIVATE_KEY - .nsis.zip.sig will NOT be generated. Auto-update payloads can't be published."
