@@ -103,15 +103,14 @@ function New-UpdaterZip($installer, $zipPath) {
 function Sign-UpdaterPayload($payload) {
   if (-not $env:TAURI_SIGNING_PRIVATE_KEY) { Die "TAURI_SIGNING_PRIVATE_KEY missing - cannot sign updater payload" }
   $password = Get-UpdaterSigningPassword
-  $signArgs = @('tauri', 'signer', 'sign', '-p', $password, $payload)
+  $signArgs = @('tauri', 'signer', 'sign', "--password=$password", $payload)
   pnpm @signArgs | Out-Null
   if ($LASTEXITCODE -ne 0) { Die "updater payload signing failed for $payload" }
 }
 function Invoke-TauriReleaseBuild {
-  Info "pnpm tauri build --target $Target --bundles nsis (updater zip signed by script)"
+  Info "pnpm tauri build --target $Target --bundles nsis --config src-tauri/tauri.windows.conf.json (updater zip signed by script)"
   $env:NODE_OPTIONS = '--max-old-space-size=4096'
-  $config = '{"bundle":{"createUpdaterArtifacts":false}}'
-  pnpm tauri build --target $Target --bundles nsis --config $config
+  pnpm tauri build --target $Target --bundles nsis --config src-tauri/tauri.windows.conf.json
   $script:TauriBuildExitCode = $LASTEXITCODE
 }
 

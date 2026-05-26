@@ -134,7 +134,7 @@ function Ensure-Sig($payload) {
     Info "  signing $(Split-Path $payload -Leaf)"
     Remove-Item -LiteralPath $sig -Force -ErrorAction SilentlyContinue
     $password = Get-UpdaterSigningPassword
-    $signArgs = @('tauri', 'signer', 'sign', '-p', $password, $payload)
+    $signArgs = @('tauri', 'signer', 'sign', "--password=$password", $payload)
     pnpm @signArgs | Out-Null
     if ($LASTEXITCODE -ne 0) { Die "updater payload signing failed for $payload" }
   }
