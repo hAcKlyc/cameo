@@ -34,6 +34,15 @@ function Info($m) { Write-Host "-> $m" }
 function Ok($m)   { Write-Host "  [ok] $m" -ForegroundColor Green }
 function Warn($m) { Write-Host "  [!] $m"  -ForegroundColor Yellow }
 function Die($m)  { Write-Host "  [x] $m"  -ForegroundColor Red; exit 1 }
+function Test-NameHasVersionToken($name, $version) {
+  $escaped = [regex]::Escape($version)
+  return $name -match "(^|[^0-9])$escaped([^0-9]|$)"
+}
+function Assert-NameHasVersionToken($artifact, $label, $version) {
+  if (-not (Test-NameHasVersionToken $artifact.Name $version)) {
+    Die "$label version mismatch: expected file name to include $version, got $($artifact.Name)"
+  }
+}
 function Format-Size($path) {
   $bytes = (Get-Item -LiteralPath $path).Length
   if ($bytes -ge 1GB) { return "{0:N1} GB" -f ($bytes / 1GB) }
@@ -77,16 +86,24 @@ foreach ($v in 'R2_ACCESS_KEY_ID', 'R2_SECRET_ACCESS_KEY', 'R2_ENDPOINT', 'R2_BU
   if (-not [Environment]::GetEnvironmentVariable($v)) { Die "$v missing from .env" }
 }
 if (-not $env:TAURI_SIGNING_PRIVATE_KEY) {
-  Warn "TAURI_SIGNING_PRIVATE_KEY not set - manifest will reference an unsigned payload (clients will refuse it)"
+  Warn "TAURI_SIGNING_PRIVATE_KEY not set - publish will fail unless a non-empty .sig already exists"
+} elseif ($null -eq [Environment]::GetEnvironmentVariable('TAURI_SIGNING_PRIVATE_KEY_PASSWORD', 'Process')) {
+  [Environment]::SetEnvironmentVariable('TAURI_SIGNING_PRIVATE_KEY_PASSWORD', '', 'Process')
 }
 $Rclone = Resolve-LocalCommand 'rclone'
 if (-not $Rclone) { Die "rclone not found - install it or place rclone.exe in the project root" }
 Ok "rclone: $Rclone"
 
 # -- version -----------------------------------------------------------------
-$Version = (Get-Content (Join-Path $PSScriptRoot 'src-tauri\tauri.conf.json') -Raw | ConvertFrom-Json).version
-if (-not $Version) { Die "could not read version from tauri.conf.json" }
-Ok "version: $Version"
+$pkgVer = (node -p "require('./package.json').version" 2>$null)
+$confVer = (node -p "require('./src-tauri/tauri.conf.json').version" 2>$null)
+$cargoVer = ((Select-String -Path 'src-tauri\Cargo.toml' -Pattern '^version\s*=\s*"(.*)"').Matches[0].Groups[1].Value)
+if ($pkgVer -eq $confVer -and $confVer -eq $cargoVer) {
+  $Version = $confVer
+  Ok "version: $Version (package.json = tauri.conf.json = Cargo.toml)"
+} else {
+  Die "version mismatch: package.json=$pkgVer tauri.conf.json=$confVer Cargo.toml=$cargoVer"
+}
 $PubDate = (Get-Date).ToUniversalTime().ToString("yyyy-MM-ddTHH:mm:ssZ")
 $Notes = "Cameo v$Version"
 $DownloadBase = "https://r.cameo.ink/release/v$Version"
@@ -103,27 +120,32 @@ New-Item -ItemType Directory -Path $manifestDir -Force | Out-Null
 $uploads = New-Object System.Collections.ArrayList
 function Queue($src, $dst) { [void]$uploads.Add([pscustomobject]@{ Src = $src; Dst = $dst }) }
 
-# Sign a payload if .sig is missing. Best-effort - returns $null on failure.
+# Sign a payload when the signing key is available; otherwise require a
+# pre-existing non-empty .sig. Re-signing avoids pairing a fresh payload with a
+# stale signature that happens to have the same filename.
 function Ensure-Sig($payload) {
   $sig = "$payload.sig"
-  if (Test-Path $sig) { return $sig }
-  if (-not $env:TAURI_SIGNING_PRIVATE_KEY) { return $null }
-  Info "  signing $(Split-Path $payload -Leaf)"
-  $keyfile = New-TemporaryFile
-  Set-Content -Path $keyfile.FullName -Value $env:TAURI_SIGNING_PRIVATE_KEY -NoNewline
-  try {
-    if ($env:TAURI_SIGNING_PRIVATE_KEY_PASSWORD) {
-      pnpm tauri signer sign -k $keyfile.FullName -p $env:TAURI_SIGNING_PRIVATE_KEY_PASSWORD $payload | Out-Null
-    } else {
-      pnpm tauri signer sign -k $keyfile.FullName $payload | Out-Null
-    }
-  } finally { Remove-Item $keyfile.FullName -ErrorAction SilentlyContinue }
-  if (Test-Path $sig) { return $sig } else { return $null }
+  if ($env:TAURI_SIGNING_PRIVATE_KEY) {
+    Info "  signing $(Split-Path $payload -Leaf)"
+    Remove-Item -LiteralPath $sig -Force -ErrorAction SilentlyContinue
+    $keyfile = New-TemporaryFile
+    Set-Content -Path $keyfile.FullName -Value $env:TAURI_SIGNING_PRIVATE_KEY -NoNewline
+    try {
+      if ($env:TAURI_SIGNING_PRIVATE_KEY_PASSWORD) {
+        pnpm tauri signer sign -f $keyfile.FullName -p $env:TAURI_SIGNING_PRIVATE_KEY_PASSWORD $payload | Out-Null
+      } else {
+        pnpm tauri signer sign -f $keyfile.FullName $payload | Out-Null
+      }
+    } finally { Remove-Item $keyfile.FullName -ErrorAction SilentlyContinue }
+  }
+  if ((Test-Path $sig) -and ((Get-Item -LiteralPath $sig).Length -gt 0)) { return $sig }
+  return $null
 }
 
 function Write-Manifest($name, $payloadFilename, $sigFile) {
   $signature = ''
   if ($sigFile -and (Test-Path $sigFile)) { $signature = (Get-Content $sigFile -Raw).Trim() }
+  if (-not $signature) { Die "signature empty for $payloadFilename" }
   $out = Join-Path $manifestDir "$name.json"
   $json = @"
 {
@@ -137,7 +159,6 @@ function Write-Manifest($name, $payloadFilename, $sigFile) {
   # UTF-8 WITHOUT BOM - a BOM breaks serde_json parsing on the client.
   [System.IO.File]::WriteAllText($out, $json, (New-Object System.Text.UTF8Encoding $false))
   Ok "manifest: $name.json"
-  if (-not $signature) { Warn "  signature empty - clients will REJECT this update" }
   Queue $out "update/$name.json"
 }
 
@@ -148,29 +169,34 @@ $ghRepo  = "hAcKlyc/cameo"
 $ghFiles = @()
 
 # -- Windows scan (x64) ------------------------------------------------------
-$zip = Get-ChildItem -Path $nsisDir -Filter '*.nsis.zip' -ErrorAction SilentlyContinue | Select-Object -First 1
-$exe = Get-ChildItem -Path $nsisDir -Filter '*-setup.exe' -ErrorAction SilentlyContinue | Select-Object -First 1
+$zip = Get-ChildItem -Path $nsisDir -Filter '*.nsis.zip' -ErrorAction SilentlyContinue |
+  Where-Object { Test-NameHasVersionToken $_.Name $Version } |
+  Sort-Object LastWriteTime -Descending | Select-Object -First 1
+$exe = Get-ChildItem -Path $nsisDir -Filter '*-setup.exe' -ErrorAction SilentlyContinue |
+  Where-Object { Test-NameHasVersionToken $_.Name $Version } |
+  Sort-Object LastWriteTime -Descending | Select-Object -First 1
 
-if (-not $zip) {
-  Warn "no .nsis.zip updater payload in $nsisDir - installer-only release (no auto-update)"
-} else {
-  $sig = Ensure-Sig $zip.FullName
-  $zipName = $zip.Name
-  Queue $zip.FullName "release/v$Version/$zipName"
-  if ($sig) { Queue $sig "release/v$Version/$zipName.sig" }
-  Write-Manifest "windows-x86_64" $zipName $sig
-}
-if ($exe) {
-  Queue $exe.FullName "release/v$Version/$($exe.Name)"
-  $ghFiles += $exe.FullName  # also publish the installer to the GitHub release
-  Ok "  installer: $($exe.Name)"
+if (-not $zip) { Die "no current-version .nsis.zip updater payload in $nsisDir" }
+Assert-NameHasVersionToken $zip 'updater payload' $Version
+$sig = Ensure-Sig $zip.FullName
+if (-not $sig) { Die "updater signature missing: $($zip.FullName).sig" }
+$zipName = $zip.Name
+Queue $zip.FullName "release/v$Version/$zipName"
+Queue $sig "release/v$Version/$zipName.sig"
+Write-Manifest "windows-x86_64" $zipName $sig
 
-  # Website download manifest (latest_win.json) -> GitHub release. cameo_web's
-  # download button fetches cameo.ink/update/latest_win.json (proxying
-  # releases/latest/download/latest_win.json); url -> the GitHub asset.
-  $latestWin = Join-Path $manifestDir 'latest_win.json'
-  $ghDlBase  = "https://github.com/$ghRepo/releases/download/v$Version"
-  @"
+if (-not $exe) { Die "no current-version NSIS installer in $nsisDir" }
+Assert-NameHasVersionToken $exe 'installer' $Version
+Queue $exe.FullName "release/v$Version/$($exe.Name)"
+$ghFiles += $exe.FullName  # also publish the installer to the GitHub release
+Ok "  installer: $($exe.Name)"
+
+# Website download manifest (latest_win.json) -> GitHub release. cameo_web's
+# download button fetches cameo.ink/update/latest_win.json (proxying
+# releases/latest/download/latest_win.json); url -> the GitHub asset.
+$latestWin = Join-Path $manifestDir 'latest_win.json'
+$ghDlBase  = "https://github.com/$ghRepo/releases/download/v$Version"
+$latestJson = @"
 {
   "version": "$Version",
   "pub_date": "$PubDate",
@@ -179,10 +205,10 @@ if ($exe) {
     "win_x64": { "name": "Windows x64", "url": "$ghDlBase/$($exe.Name)" }
   }
 }
-"@ | Set-Content -Path $latestWin -Encoding utf8
-  $ghFiles += $latestWin
-  Ok "manifest: latest_win.json (website download -> GitHub release)"
-}
+"@
+[System.IO.File]::WriteAllText($latestWin, $latestJson, (New-Object System.Text.UTF8Encoding $false))
+$ghFiles += $latestWin
+Ok "manifest: latest_win.json (website download -> GitHub release)"
 
 # -- upload ------------------------------------------------------------------
 if ($uploads.Count -eq 0) { Die "no artifacts to upload - did you run .\build_release.ps1 first?" }

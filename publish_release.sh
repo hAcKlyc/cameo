@@ -36,6 +36,17 @@ ok()   { printf '  \033[32m✓\033[0m %s\n' "$*"; }
 warn() { printf '  \033[33m!\033[0m %s\n' "$*"; }
 die()  { printf '  \033[31m✗\033[0m %s\n' "$*" >&2; exit 1; }
 size_of() { ls -lh "$1" | awk '{print $5}'; }
+tarball_short_version() {
+  tar -xOzf "$1" Cameo.app/Contents/Info.plist 2>/dev/null \
+    | plutil -extract CFBundleShortVersionString raw - 2>/dev/null || true
+}
+expected_dmg_name() {
+  case "$1" in
+    aarch64-apple-darwin) echo "Cameo_${2}_aarch64.dmg" ;;
+    x86_64-apple-darwin) echo "Cameo_${2}_x64.dmg" ;;
+    *) echo "" ;;
+  esac
+}
 
 [[ "$(uname -s)" == "Darwin" ]] || die "macOS only — on Windows run publish_release.ps1"
 
@@ -58,15 +69,23 @@ for v in R2_ACCESS_KEY_ID R2_SECRET_ACCESS_KEY R2_ENDPOINT R2_BUCKET; do
 done
 
 if [[ -z "${TAURI_SIGNING_PRIVATE_KEY:-}" ]]; then
-  warn "TAURI_SIGNING_PRIVATE_KEY not set — manifests will reference unsigned payloads (clients will refuse them)"
+  warn "TAURI_SIGNING_PRIVATE_KEY not set — publish will fail unless non-empty .sig files already exist"
+else
+  export TAURI_SIGNING_PRIVATE_KEY_PASSWORD="${TAURI_SIGNING_PRIVATE_KEY_PASSWORD-}"
 fi
 
 command -v rclone >/dev/null || die "rclone not on PATH — brew install rclone"
 
 # ── version ─────────────────────────────────────────────────────────────────
-VERSION=$(node -p "require('./src-tauri/tauri.conf.json').version")
-[[ -n "$VERSION" ]] || die "could not read version from tauri.conf.json"
-ok "version: $VERSION"
+pkg_ver=$(node -p "require('./package.json').version" 2>/dev/null || echo "?")
+conf_ver=$(node -p "require('./src-tauri/tauri.conf.json').version" 2>/dev/null || echo "?")
+cargo_ver=$(grep -m1 '^version' src-tauri/Cargo.toml | sed -E 's/.*"(.*)".*/\1/')
+if [[ "$pkg_ver" == "$conf_ver" && "$conf_ver" == "$cargo_ver" ]]; then
+  VERSION="$conf_ver"
+  ok "version: $VERSION (package.json = tauri.conf.json = Cargo.toml)"
+else
+  die "version mismatch: package.json=$pkg_ver tauri.conf.json=$conf_ver Cargo.toml=$cargo_ver"
+fi
 PUB_DATE=$(date -u +%Y-%m-%dT%H:%M:%SZ)
 NOTES="Cameo v${VERSION}"
 DOWNLOAD_BASE="https://r.cameo.ink/release/v${VERSION}"
@@ -85,29 +104,28 @@ queue() {
   UPLOADS+=("$1|$2")
 }
 
-# Sign a payload if .sig is missing. Best-effort — failure leaves SIG="".
+# Sign a payload when the signing key is available; otherwise require a
+# pre-existing non-empty .sig. Re-signing avoids pairing a fresh payload with a
+# stale signature that happens to have the same filename.
 ensure_sig() {
   local payload="$1"
   local sig="${payload}.sig"
-  if [[ -f "$sig" ]]; then
-    echo "$sig"
-    return
+  if [[ -n "${TAURI_SIGNING_PRIVATE_KEY:-}" ]]; then
+    info "  signing $(basename "$payload")" >&2
+    rm -f "$sig"
+    local keyfile
+    keyfile=$(mktemp)
+    chmod 600 "$keyfile"
+    echo "$TAURI_SIGNING_PRIVATE_KEY" > "$keyfile"
+    if [[ -n "${TAURI_SIGNING_PRIVATE_KEY_PASSWORD:-}" ]]; then
+      pnpm tauri signer sign -f "$keyfile" -p "$TAURI_SIGNING_PRIVATE_KEY_PASSWORD" "$payload" >/dev/null
+    else
+      pnpm tauri signer sign -f "$keyfile" "$payload" >/dev/null
+    fi
+    rm -f "$keyfile"
   fi
-  if [[ -z "${TAURI_SIGNING_PRIVATE_KEY:-}" ]]; then
-    return
-  fi
-  info "  signing $(basename "$payload")"
-  local keyfile
-  keyfile=$(mktemp)
-  chmod 600 "$keyfile"
-  echo "$TAURI_SIGNING_PRIVATE_KEY" > "$keyfile"
-  if [[ -n "${TAURI_SIGNING_PRIVATE_KEY_PASSWORD:-}" ]]; then
-    pnpm tauri signer sign -k "$keyfile" -p "$TAURI_SIGNING_PRIVATE_KEY_PASSWORD" "$payload" >/dev/null
-  else
-    pnpm tauri signer sign -k "$keyfile" "$payload" >/dev/null
-  fi
-  rm -f "$keyfile"
-  if [[ -f "$sig" ]]; then echo "$sig"; fi
+  [[ -s "$sig" ]] || return 1
+  echo "$sig"
 }
 
 write_manifest() {
@@ -118,6 +136,7 @@ write_manifest() {
   if [[ -n "$sig_file" && -f "$sig_file" ]]; then
     signature=$(cat "$sig_file")
   fi
+  [[ -n "$signature" ]] || die "signature empty for ${payload_filename}"
   local out="${MANIFEST_DIR}/${manifest_name}.json"
   cat > "$out" <<EOF
 {
@@ -129,9 +148,6 @@ write_manifest() {
 }
 EOF
   ok "manifest: ${manifest_name}.json"
-  if [[ -z "$signature" ]]; then
-    warn "  signature empty — clients will REJECT this update"
-  fi
   queue "$out" "update/${manifest_name}.json"
 }
 
@@ -149,28 +165,35 @@ for arch_pair in "aarch64-apple-darwin:aarch64:darwin-aarch64" "x86_64-apple-dar
   IFS=":" read -r RUST_TARGET ARCH MANIFEST_NAME <<< "$arch_pair"
   BUNDLE="$TARGET_DIR/$RUST_TARGET/release/bundle"
   if [[ ! -d "$BUNDLE" ]]; then
-    warn "skipping $RUST_TARGET — no bundle (run ./build_release.sh first)"
-    continue
+    die "bundle missing for $RUST_TARGET — run ./build_release.sh before publishing"
   fi
   info "$RUST_TARGET"
 
-  # .app.tar.gz for the updater, .dmg for manual download (DMG is optional — the
-  # updater doesn't need it).
-  TAR=$(find "$BUNDLE/macos" -maxdepth 1 -name "*.app.tar.gz" ! -name "*.sig" 2>/dev/null | head -1)
-  DMG=$(find "$BUNDLE/dmg" -maxdepth 1 -name "*.dmg" 2>/dev/null | head -1)
+  # .app.tar.gz for the updater, .dmg for manual download. Both must match the
+  # release version; otherwise auto-update and manual installs can diverge.
+  TAR=$(ls -t "$BUNDLE/macos/"*.app.tar.gz 2>/dev/null | head -1 || true)
+  EXPECTED_DMG=$(expected_dmg_name "$RUST_TARGET" "$VERSION")
+  DMG=""
+  [[ -n "$EXPECTED_DMG" && -f "$BUNDLE/dmg/$EXPECTED_DMG" ]] && DMG="$BUNDLE/dmg/$EXPECTED_DMG"
 
-  if [[ -z "$TAR" ]]; then
-    warn "  no .app.tar.gz for $RUST_TARGET — skipping updater manifest (DMG-only release for this arch)"
-  else
-    SIG=$(ensure_sig "$TAR" || true)
-    # Add arch suffix to the uploaded filename so ARM and Intel don't clash on
-    # R2 (Tauri names both "Cameo.app.tar.gz"; we rename on upload).
-    base=$(basename "$TAR" .app.tar.gz)
-    UPLOAD_NAME="${base}_${ARCH}.app.tar.gz"
-    queue "$TAR" "release/v${VERSION}/${UPLOAD_NAME}"
-    [[ -n "$SIG" ]] && queue "$SIG" "release/v${VERSION}/${UPLOAD_NAME}.sig"
-    write_manifest "$MANIFEST_NAME" "$UPLOAD_NAME" "$SIG"
+  if [[ -z "$TAR" && -z "$DMG" ]]; then
+    warn "skipping $RUST_TARGET — no current release artifacts"
+    continue
   fi
+
+  [[ -n "$DMG" ]] || die "current-version .dmg missing for $RUST_TARGET: expected ${EXPECTED_DMG}"
+  [[ -n "$TAR" ]] || die "updater .app.tar.gz missing for $RUST_TARGET"
+  TAR_VERSION=$(tarball_short_version "$TAR")
+  [[ "$TAR_VERSION" == "$VERSION" ]] || die "updater tarball version mismatch for $RUST_TARGET: expected $VERSION, got ${TAR_VERSION:-unknown}"
+
+  SIG=$(ensure_sig "$TAR") || die "updater signature missing for $RUST_TARGET: ${TAR}.sig"
+  # Add arch suffix to the uploaded filename so ARM and Intel don't clash on
+  # R2 (Tauri names both "Cameo.app.tar.gz"; we rename on upload).
+  base=$(basename "$TAR" .app.tar.gz)
+  UPLOAD_NAME="${base}_${ARCH}.app.tar.gz"
+  queue "$TAR" "release/v${VERSION}/${UPLOAD_NAME}"
+  queue "$SIG" "release/v${VERSION}/${UPLOAD_NAME}.sig"
+  write_manifest "$MANIFEST_NAME" "$UPLOAD_NAME" "$SIG"
 
   if [[ -n "$DMG" ]]; then
     queue "$DMG" "release/v${VERSION}/$(basename "$DMG")"

@@ -27,6 +27,15 @@ function Info($m) { Write-Host "-> $m" }
 function Ok($m)   { Write-Host "  [ok] $m" -ForegroundColor Green }
 function Warn($m) { Write-Host "  [!] $m"  -ForegroundColor Yellow }
 function Die($m)  { Write-Host "  [x] $m"  -ForegroundColor Red; exit 1 }
+function Test-NameHasVersionToken($name, $version) {
+  $escaped = [regex]::Escape($version)
+  return $name -match "(^|[^0-9])$escaped([^0-9]|$)"
+}
+function Assert-NameHasVersionToken($artifact, $label, $version) {
+  if (-not (Test-NameHasVersionToken $artifact.Name $version)) {
+    Die "$label version mismatch: expected file name to include $version, got $($artifact.Name)"
+  }
+}
 function Format-Size($path) {
   $bytes = (Get-Item -LiteralPath $path).Length
   if ($bytes -ge 1GB) { return "{0:N1} GB" -f ($bytes / 1GB) }
@@ -128,7 +137,7 @@ $cargoVer = ((Select-String -Path 'src-tauri\Cargo.toml' -Pattern '^version\s*=\
 if ($pkgVer -eq $confVer -and $confVer -eq $cargoVer) {
   Ok "version $pkgVer (package.json = tauri.conf.json = Cargo.toml)"
 } else {
-  Warn "version mismatch: package.json=$pkgVer tauri.conf.json=$confVer Cargo.toml=$cargoVer"
+  Die "version mismatch: package.json=$pkgVer tauri.conf.json=$confVer Cargo.toml=$cargoVer"
 }
 
 # -- signing note ------------------------------------------------------------
@@ -138,9 +147,9 @@ else { Warn "no Windows code-signing configured - installer will be UNSIGNED (Sm
 
 # -- Tauri update signing key (for auto-update payload signatures) ----------
 if ($env:TAURI_SIGNING_PRIVATE_KEY) {
-  Ok "tauri update signing key present - .exe.sig will be generated for auto-update"
+  Ok "tauri update signing key present - .nsis.zip.sig will be generated for auto-update"
 } else {
-  Warn "no TAURI_SIGNING_PRIVATE_KEY - .exe.sig will NOT be generated. Auto-update payloads can't be published."
+  Warn "no TAURI_SIGNING_PRIVATE_KEY - .nsis.zip.sig will NOT be generated. Auto-update payloads can't be published."
 }
 
 if (-not (Test-Path node_modules)) {
@@ -167,6 +176,11 @@ $start = Get-Date
 # tauri-plugin-updater downloads at runtime. Windows Tauri only accepts
 # `msi`/`nsis` as bundle names; unlike macOS, there is no separate `updater`
 # bundle value to pass here.
+$bundleDir = Join-Path $PSScriptRoot "src-tauri\target\$Target\release\bundle"
+if (Test-Path $bundleDir) {
+  Info "removing stale bundle artifacts for $Target"
+  Remove-Item -Recurse -Force $bundleDir
+}
 $script:TauriBuildExitCode = 0
 Invoke-TauriReleaseBuild
 $buildCode = $script:TauriBuildExitCode
@@ -186,14 +200,18 @@ $nsisDir = Join-Path $PSScriptRoot "src-tauri\target\$Target\release\bundle\nsis
 $installer = Get-ChildItem -Path $nsisDir -Filter '*-setup.exe' -ErrorAction SilentlyContinue |
   Sort-Object LastWriteTime -Descending | Select-Object -First 1
 if (-not $installer) { Die "no NSIS installer produced in $nsisDir" }
+Assert-NameHasVersionToken $installer 'installer' $confVer
 
 # Tauri places the updater payload alongside the installer (`.nsis.zip`).
 $updaterZip = Get-ChildItem -Path $nsisDir -Filter '*.nsis.zip' -ErrorAction SilentlyContinue |
   Sort-Object LastWriteTime -Descending | Select-Object -First 1
+if (-not $updaterZip) { Die "no .nsis.zip updater payload produced in $nsisDir" }
+Assert-NameHasVersionToken $updaterZip 'updater payload' $confVer
 $updaterSig = if ($updaterZip) {
   Get-ChildItem -Path $nsisDir -Filter "$($updaterZip.Name).sig" -ErrorAction SilentlyContinue |
     Sort-Object LastWriteTime -Descending | Select-Object -First 1
 } else { $null }
+if (-not $updaterSig) { Die "missing updater signature: $($updaterZip.FullName).sig" }
 
 $secs = [int]((Get-Date) - $start).TotalSeconds
 Write-Host ""
@@ -203,10 +221,7 @@ Write-Host "  +- release artifacts ---------------------------------------"
 Write-Host "     installer : $($installer.FullName) ($(Format-Size $installer.FullName))"
 if ($updaterZip) {
   Write-Host "     update    : $($updaterZip.FullName) ($(Format-Size $updaterZip.FullName))"
-  if ($updaterSig) { Write-Host "               : $($updaterSig.FullName) ($(Format-Size $updaterSig.FullName))" }
-  else { Warn "no .nsis.zip.sig - set TAURI_SIGNING_PRIVATE_KEY and re-run for auto-update support" }
-} else {
-  Warn "no .nsis.zip updater payload produced"
+  Write-Host "               : $($updaterSig.FullName) ($(Format-Size $updaterSig.FullName))"
 }
 Write-Host "  +-----------------------------------------------------------"
 Write-Host ""
