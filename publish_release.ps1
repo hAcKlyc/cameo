@@ -128,15 +128,7 @@ function Ensure-Sig($payload) {
   if ($env:TAURI_SIGNING_PRIVATE_KEY) {
     Info "  signing $(Split-Path $payload -Leaf)"
     Remove-Item -LiteralPath $sig -Force -ErrorAction SilentlyContinue
-    $keyfile = New-TemporaryFile
-    Set-Content -Path $keyfile.FullName -Value $env:TAURI_SIGNING_PRIVATE_KEY -NoNewline
-    try {
-      if ($env:TAURI_SIGNING_PRIVATE_KEY_PASSWORD) {
-        pnpm tauri signer sign -f $keyfile.FullName -p $env:TAURI_SIGNING_PRIVATE_KEY_PASSWORD $payload | Out-Null
-      } else {
-        pnpm tauri signer sign -f $keyfile.FullName $payload | Out-Null
-      }
-    } finally { Remove-Item $keyfile.FullName -ErrorAction SilentlyContinue }
+    pnpm tauri signer sign $payload | Out-Null
   }
   if ((Test-Path $sig) -and ((Get-Item -LiteralPath $sig).Length -gt 0)) { return $sig }
   return $null

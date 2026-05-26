@@ -113,16 +113,7 @@ ensure_sig() {
   if [[ -n "${TAURI_SIGNING_PRIVATE_KEY:-}" ]]; then
     info "  signing $(basename "$payload")" >&2
     rm -f "$sig"
-    local keyfile
-    keyfile=$(mktemp)
-    chmod 600 "$keyfile"
-    echo "$TAURI_SIGNING_PRIVATE_KEY" > "$keyfile"
-    if [[ -n "${TAURI_SIGNING_PRIVATE_KEY_PASSWORD:-}" ]]; then
-      pnpm tauri signer sign -f "$keyfile" -p "$TAURI_SIGNING_PRIVATE_KEY_PASSWORD" "$payload" >/dev/null
-    else
-      pnpm tauri signer sign -f "$keyfile" "$payload" >/dev/null
-    fi
-    rm -f "$keyfile"
+    pnpm tauri signer sign "$payload" >/dev/null
   fi
   [[ -s "$sig" ]] || return 1
   echo "$sig"
