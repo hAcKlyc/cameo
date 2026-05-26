@@ -63,6 +63,11 @@ function Resolve-LocalCommand($name) {
 
   return $null
 }
+function Get-UpdaterSigningPassword {
+  $password = [Environment]::GetEnvironmentVariable('TAURI_SIGNING_PRIVATE_KEY_PASSWORD', 'Process')
+  if ($null -eq $password) { return '' }
+  return $password
+}
 
 $Target = 'x86_64-pc-windows-msvc'
 
@@ -128,7 +133,10 @@ function Ensure-Sig($payload) {
   if ($env:TAURI_SIGNING_PRIVATE_KEY) {
     Info "  signing $(Split-Path $payload -Leaf)"
     Remove-Item -LiteralPath $sig -Force -ErrorAction SilentlyContinue
-    pnpm tauri signer sign $payload | Out-Null
+    $password = Get-UpdaterSigningPassword
+    $signArgs = @('tauri', 'signer', 'sign', '-p', $password, $payload)
+    pnpm @signArgs | Out-Null
+    if ($LASTEXITCODE -ne 0) { Die "updater payload signing failed for $payload" }
   }
   if ((Test-Path $sig) -and ((Get-Item -LiteralPath $sig).Length -gt 0)) { return $sig }
   return $null

@@ -78,10 +78,40 @@ function Repair-NsisTauriUtilsCache {
 
   Warn "could not prefetch nsis_tauri_utils.dll; retrying Tauri anyway"
 }
+function Get-UpdaterSigningPassword {
+  $password = [Environment]::GetEnvironmentVariable('TAURI_SIGNING_PRIVATE_KEY_PASSWORD', 'Process')
+  if ($null -eq $password) { return '' }
+  return $password
+}
+function New-UpdaterZip($installer, $zipPath) {
+  Remove-Item -LiteralPath $zipPath -Force -ErrorAction SilentlyContinue
+  Remove-Item -LiteralPath "$zipPath.sig" -Force -ErrorAction SilentlyContinue
+
+  Add-Type -AssemblyName System.IO.Compression.FileSystem
+  $archive = [System.IO.Compression.ZipFile]::Open($zipPath, [System.IO.Compression.ZipArchiveMode]::Create)
+  try {
+    [System.IO.Compression.ZipFileExtensions]::CreateEntryFromFile(
+      $archive,
+      $installer.FullName,
+      $installer.Name,
+      [System.IO.Compression.CompressionLevel]::Optimal
+    ) | Out-Null
+  } finally {
+    $archive.Dispose()
+  }
+}
+function Sign-UpdaterPayload($payload) {
+  if (-not $env:TAURI_SIGNING_PRIVATE_KEY) { Die "TAURI_SIGNING_PRIVATE_KEY missing - cannot sign updater payload" }
+  $password = Get-UpdaterSigningPassword
+  $signArgs = @('tauri', 'signer', 'sign', '-p', $password, $payload)
+  pnpm @signArgs | Out-Null
+  if ($LASTEXITCODE -ne 0) { Die "updater payload signing failed for $payload" }
+}
 function Invoke-TauriReleaseBuild {
-  Info "pnpm tauri build --target $Target --bundles nsis"
+  Info "pnpm tauri build --target $Target --bundles nsis (updater zip signed by script)"
   $env:NODE_OPTIONS = '--max-old-space-size=4096'
-  pnpm tauri build --target $Target --bundles nsis
+  $config = '{"bundle":{"createUpdaterArtifacts":false}}'
+  pnpm tauri build --target $Target --bundles nsis --config $config
   $script:TauriBuildExitCode = $LASTEXITCODE
 }
 
@@ -174,11 +204,10 @@ if ($LASTEXITCODE -ne 0) { Die "typecheck failed" }
 $start = Get-Date
 
 # -- build NSIS installer + updater payload ----------------------------------
-# `nsis` produces the user-visible installer .exe (Cameo_<ver>_x64-setup.exe)
-# and, when the updater is configured, the .nsis.zip + .nsis.zip.sig pair that
-# tauri-plugin-updater downloads at runtime. Windows Tauri only accepts
-# `msi`/`nsis` as bundle names; unlike macOS, there is no separate `updater`
-# bundle value to pass here.
+# `nsis` produces the user-visible installer .exe (Cameo_<ver>_x64-setup.exe).
+# We disable Tauri's automatic updater artifact signing for Windows because an
+# empty updater-key password can fall back to an interactive prompt in this
+# toolchain. The script zips and signs the updater payload explicitly below.
 $bundleDir = Join-Path $PSScriptRoot "src-tauri\target\$Target\release\bundle"
 if (Test-Path $bundleDir) {
   Info "removing stale bundle artifacts for $Target"
@@ -205,15 +234,16 @@ $installer = Get-ChildItem -Path $nsisDir -Filter '*-setup.exe' -ErrorAction Sil
 if (-not $installer) { Die "no NSIS installer produced in $nsisDir" }
 Assert-NameHasVersionToken $installer 'installer' $confVer
 
-# Tauri places the updater payload alongside the installer (`.nsis.zip`).
-$updaterZip = Get-ChildItem -Path $nsisDir -Filter '*.nsis.zip' -ErrorAction SilentlyContinue |
-  Sort-Object LastWriteTime -Descending | Select-Object -First 1
-if (-not $updaterZip) { Die "no .nsis.zip updater payload produced in $nsisDir" }
+# Tauri's Windows updater accepts a zip containing the NSIS installer at the
+# archive root. Build it ourselves so signing is non-interactive.
+$updaterZipPath = Join-Path $nsisDir "$($installer.BaseName).nsis.zip"
+Info "creating updater payload $(Split-Path $updaterZipPath -Leaf)"
+New-UpdaterZip $installer $updaterZipPath
+$updaterZip = Get-Item -LiteralPath $updaterZipPath
 Assert-NameHasVersionToken $updaterZip 'updater payload' $confVer
-$updaterSig = if ($updaterZip) {
-  Get-ChildItem -Path $nsisDir -Filter "$($updaterZip.Name).sig" -ErrorAction SilentlyContinue |
-    Sort-Object LastWriteTime -Descending | Select-Object -First 1
-} else { $null }
+Info "signing updater payload"
+Sign-UpdaterPayload $updaterZip.FullName
+$updaterSig = Get-Item -LiteralPath "$($updaterZip.FullName).sig" -ErrorAction SilentlyContinue
 if (-not $updaterSig) { Die "missing updater signature: $($updaterZip.FullName).sig" }
 
 $secs = [int]((Get-Date) - $start).TotalSeconds
