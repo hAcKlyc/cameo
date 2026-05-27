@@ -140,11 +140,18 @@ export interface ChatImageResolution {
   error: string | null;
 }
 
-/** Build a cross-platform `cameo://` URL for a texture fetch.
+function customProtocolBase(): string {
+  const ua = typeof navigator === "undefined" ? "" : navigator.userAgent;
+  // Tauri serves custom protocols as http://<scheme>.localhost on WebView2.
+  return /\bWindows\b|Android/i.test(ua) ? "http://cameo.localhost" : "cameo://localhost";
+}
+
+/** Build a cross-platform Cameo protocol URL for a texture fetch.
  *
  * Board id lives in the path, not the host: WebView2 represents custom
- * protocols as `http://<scheme>.localhost/...`, so host-based routing breaks
- * on Windows. Relative paths are slash-normalized before per-segment encoding.
+ * protocols as `http://<scheme>.localhost/...`, while macOS uses the native
+ * custom scheme. Relative paths are slash-normalized before per-segment
+ * encoding.
  */
 export function cameoUrl(boardId: string, relPath: string): string {
   const encBoard = encodeURIComponent(boardId);
@@ -153,5 +160,5 @@ export function cameoUrl(boardId: string, relPath: string): string {
     .split("/")
     .map((seg) => encodeURIComponent(seg))
     .join("/");
-  return `cameo://localhost/${encBoard}/${enc}`;
+  return `${customProtocolBase()}/${encBoard}/${enc}`;
 }
