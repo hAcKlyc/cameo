@@ -321,6 +321,7 @@ function AgentStatus({ status, rateLimit }: { status: SessionStatus; rateLimit: 
   const [info, setInfo] = useState<CodexInfo | null>(null);
   const [loading, setLoading] = useState(false);
   const ref = useRef<HTMLDivElement>(null);
+  const boardId = useBoardStore((s) => s.boardId);
   const t = useT();
   const lang = useLocaleStore((s) => s.lang);
   const statusLabel = t(`agent.status.${status}` as MsgKey);
@@ -335,9 +336,14 @@ function AgentStatus({ status, rateLimit }: { status: SessionStatus; rateLimit: 
   }, []);
 
   const reconnect = useCallback(() => {
-    useSettingsStore.setState((s) => ({ restartNonce: s.restartNonce + 1 }));
+    void (async () => {
+      if (!boardId) return;
+      await ipc.stopSession(boardId).catch(() => { /* best effort */ });
+      if (useBoardStore.getState().boardId !== boardId) return;
+      useSettingsStore.setState((s) => ({ restartNonce: s.restartNonce + 1 }));
+    })();
     setOpen(false);
-  }, []);
+  }, [boardId]);
 
   useEffect(() => {
     if (open && !info) detect();

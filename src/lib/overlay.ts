@@ -1,6 +1,7 @@
 import type { Asset, Shape } from "../types";
-import { cameoUrl, ipc, type OverlayRef } from "./ipc";
+import { ipc, type OverlayRef } from "./ipc";
 import { useBoardStore } from "../store/board";
+import { loadAssetImage } from "./asset-url";
 
 /** Where a mark's number badge sits (the point / bbox center / path end). */
 function shapeAnchor(s: Shape): [number, number] {
@@ -10,16 +11,6 @@ function shapeAnchor(s: Shape): [number, number] {
   const [a, b] = pts;
   if (a && b) return [(a[0] + b[0]) / 2, (a[1] + b[1]) / 2];
   return [0, 0];
-}
-
-function loadImage(url: string): Promise<HTMLImageElement> {
-  return new Promise((resolve, reject) => {
-    const img = new Image();
-    img.crossOrigin = "anonymous"; // Cameo image protocol sends ACAO * -> untainted canvas
-    img.onload = () => resolve(img);
-    img.onerror = () => reject(new Error(`load ${url}`));
-    img.src = url;
-  });
 }
 
 /**
@@ -36,7 +27,7 @@ async function renderOverlayBytes(boardId: string, asset: Asset, shapes: Shape[]
   const ctx = canvas.getContext("2d");
   if (!ctx) throw new Error("no 2d context");
 
-  const img = await loadImage(cameoUrl(boardId, asset.path));
+  const img = await loadAssetImage(boardId, asset.path, asset.mime);
   ctx.drawImage(img, 0, 0, w, h);
 
   ctx.translate(w / 2, h / 2); // shapes use a center origin

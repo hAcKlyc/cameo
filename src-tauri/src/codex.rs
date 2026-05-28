@@ -1267,10 +1267,7 @@ async fn stderr_drain(inner: Arc<CodexSessionInner>, stderr: tokio::process::Chi
             STDERR_SURFACE.iter().find(|(sub, _, _)| low.contains(sub))
         {
             let detail: String = text.chars().take(200).collect();
-            inner.emit(UnifiedEvent::Log {
-                level: (*level).into(),
-                message: format!("{prefix}: {detail}"),
-            });
+            emit_runtime_log(&inner, level, format!("{prefix}: {detail}"));
         }
     }
 }
@@ -1351,11 +1348,48 @@ fn codex_notice_message(params: &Value) -> Option<String> {
     }
 }
 
+fn parse_u64_prefix(s: &str) -> Option<u64> {
+    let digits: String = s
+        .trim()
+        .chars()
+        .take_while(|ch| ch.is_ascii_digit())
+        .collect();
+    if digits.is_empty() {
+        None
+    } else {
+        digits.parse().ok()
+    }
+}
+
+fn transport_status_from_log(message: &str) -> Option<(&'static str, Option<u64>, Option<u64>)> {
+    let lower = message.to_ascii_lowercase();
+    const RECONNECTING: &str = "reconnecting...";
+    if lower.starts_with(RECONNECTING) {
+        let tail = message.get(RECONNECTING.len()..).unwrap_or("").trim();
+        let mut parts = tail.split('/');
+        let attempt = parts.next().and_then(parse_u64_prefix);
+        let max = parts.next().and_then(parse_u64_prefix);
+        return Some(("reconnecting", attempt, max));
+    }
+    if lower.starts_with("falling back from websockets to https transport.") {
+        return Some(("fallback", None, None));
+    }
+    None
+}
+
 fn emit_runtime_log(inner: &Arc<CodexSessionInner>, level: &str, message: String) {
     match level {
         "error" => tracing::error!(module = "codex", "{message}"),
         "warn" => tracing::warn!(module = "codex", "{message}"),
         _ => tracing::info!(module = "codex", "{message}"),
+    }
+    if let Some((phase, attempt, max)) = transport_status_from_log(&message) {
+        inner.emit(UnifiedEvent::TransportStatus {
+            phase: phase.to_string(),
+            attempt,
+            max,
+            message: message.clone(),
+        });
     }
     inner.emit(UnifiedEvent::Log {
         level: level.to_string(),
@@ -1570,10 +1604,7 @@ async fn handle_notification(inner: &Arc<CodexSessionInner>, method: &str, param
                     params = %raw,
                     "codex error notification kept non-terminal: {msg}"
                 );
-                inner.emit(UnifiedEvent::Log {
-                    level: "warn".into(),
-                    message: msg,
-                });
+                emit_runtime_log(inner, "warn", msg);
             } else {
                 tracing::warn!(
                     module = "codex",
@@ -1591,10 +1622,7 @@ async fn handle_notification(inner: &Arc<CodexSessionInner>, method: &str, param
                 .unwrap_or("");
             tracing::warn!(module = "codex", "{method}: {msg}");
             if !msg.is_empty() {
-                inner.emit(UnifiedEvent::Log {
-                    level: "warn".into(),
-                    message: msg.to_string(),
-                });
+                emit_runtime_log(inner, "warn", msg.to_string());
             }
         }
         _ => { /* forward-compat: ignore unknown notifications */ }

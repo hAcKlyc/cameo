@@ -154,7 +154,11 @@ async function loadBoardTexture(boardId: string, asset: Asset): Promise<Texture>
   } catch (err) {
     void ipc.frontLog("warn", `protocol texture load failed ${asset.path}: ${err}; using IPC bytes`);
     const objectUrl = await loadAssetObjectUrl(boardId, asset.path, asset.mime);
-    return loadTexture(objectUrl);
+    try {
+      return await loadTexture(objectUrl);
+    } finally {
+      URL.revokeObjectURL(objectUrl);
+    }
   }
 }
 
@@ -1897,7 +1901,7 @@ export class CanvasScene {
     if (e.ctrlKey || e.metaKey || e.deltaZ !== 0) {
       const unit = e.deltaMode === WheelEvent.DOM_DELTA_LINE ? 16 : e.deltaMode === WheelEvent.DOM_DELTA_PAGE ? 800 : 1;
       const delta = e.deltaZ !== 0 ? e.deltaZ : e.deltaY * unit;
-      const factor = Math.exp(-delta * 0.01);
+      const factor = Math.exp(-clamp(delta, -120, 120) * 0.01);
       const rect = this.canvasEl?.getBoundingClientRect();
       const sx = rect ? e.clientX - rect.left : e.offsetX;
       const sy = rect ? e.clientY - rect.top : e.offsetY;

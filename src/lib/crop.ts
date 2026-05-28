@@ -1,20 +1,10 @@
 import type { Asset, Rect } from "../types";
-import { cameoUrl } from "./ipc";
-
-function loadImage(url: string): Promise<HTMLImageElement> {
-  return new Promise((resolve, reject) => {
-    const img = new Image();
-    img.crossOrigin = "anonymous";
-    img.onload = () => resolve(img);
-    img.onerror = () => reject(new Error(`load ${url}`));
-    img.src = url;
-  });
-}
+import { loadAssetImage } from "./asset-url";
 
 /** Render a normalized crop rect [0,1] of an asset to PNG bytes for
  *  replace_placement_image. Non-destructive — the original file is untouched. */
 export async function bakeCrop(boardId: string, asset: Asset, rect: Rect): Promise<number[]> {
-  const img = await loadImage(cameoUrl(boardId, asset.path));
+  const img = await loadAssetImage(boardId, asset.path, asset.mime);
   const W = asset.width;
   const H = asset.height;
   const sx = Math.max(0, rect.x * W);

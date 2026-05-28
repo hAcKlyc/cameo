@@ -160,6 +160,13 @@ export type CodexEvent =
       reached?: string | null;
     }
   | { kind: "status"; state: string }
+  | {
+      kind: "transportStatus";
+      phase: "reconnecting" | "fallback";
+      attempt?: number | null;
+      max?: number | null;
+      message: string;
+    }
   /** Fatal runtime failure. Recoverable diagnostics arrive as `log`. */
   | { kind: "error"; message: string }
   | { kind: "sessionComplete"; ok: boolean; message: string }

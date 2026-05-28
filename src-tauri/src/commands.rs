@@ -423,20 +423,41 @@ fn asset_abs_path(entry: &BoardEntry, placement_id: &str) -> Result<PathBuf, Str
     Ok(abs)
 }
 
-fn asset_rel_abs_path(entry: &BoardEntry, rel: &str) -> Result<PathBuf, String> {
+fn board_safe_rel_path(rel: &str) -> Result<PathBuf, String> {
     let rel_path = PathBuf::from(rel);
     for comp in rel_path.components() {
         if !matches!(comp, Component::Normal(_)) {
             return Err("asset path escapes the board folder".into());
         }
     }
+    Ok(rel_path)
+}
 
+fn asset_rel_abs_path(entry: &BoardEntry, rel: &str) -> Result<PathBuf, String> {
+    let rel_path = board_safe_rel_path(rel)?;
     let abs = entry.folder.join(&rel_path).canonicalize().map_err(e2s)?;
     let root = entry.folder.canonicalize().map_err(e2s)?;
     if !abs.starts_with(&root) {
         return Err("asset path escapes the board folder".into());
     }
     Ok(abs)
+}
+
+fn board_doc_asset_abs_path(entry: &BoardEntry, rel: &str) -> Result<PathBuf, String> {
+    let rel_path = board_safe_rel_path(rel)?;
+    let asset_path = {
+        let doc = entry.doc.lock();
+        let asset = doc
+            .assets
+            .iter()
+            .find(|a| Path::new(&a.path) == rel_path.as_path())
+            .ok_or("asset not found")?;
+        if !asset.mime.starts_with("image/") {
+            return Err("asset is not an image".into());
+        }
+        asset.path.clone()
+    };
+    asset_rel_abs_path(entry, &asset_path)
 }
 
 /// Read image bytes for a Board-relative asset. This is intentionally scoped to
@@ -449,7 +470,7 @@ pub fn read_asset_bytes(
     registry: State<Arc<BoardRegistry>>,
 ) -> Result<Vec<u8>, String> {
     let entry = registry.get(&board_id).ok_or("unknown board")?;
-    let path = asset_rel_abs_path(&entry, &rel_path)?;
+    let path = board_doc_asset_abs_path(&entry, &rel_path)?;
     std::fs::read(path).map_err(e2s)
 }
 

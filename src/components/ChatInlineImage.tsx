@@ -3,7 +3,7 @@ import { Copy, FileText, FolderOpen, Image, ImagePlus, Maximize } from "lucide-r
 import { useChatStore } from "../store/chat";
 import { useBoardStore } from "../store/board";
 import { useComposerStore } from "../store/composer";
-import { ipc } from "../lib/ipc";
+import { cameoUrl, ipc } from "../lib/ipc";
 import { useAssetObjectUrl } from "../lib/asset-url";
 import { useT } from "../i18n/locale";
 
@@ -21,6 +21,8 @@ import { useT } from "../i18n/locale";
 export function ChatInlineImage({ path }: { path: string }) {
   const t = useT();
   const boardId = useBoardStore((s) => s.boardId);
+  const placements = useBoardStore((s) => s.placements);
+  const assets = useBoardStore((s) => s.assets);
   const resolution = useChatStore((s) => s.imageResolutions.get(path));
   const resolveChatImage = useChatStore((s) => s.resolveChatImage);
   const [menu, setMenu] = useState<{ x: number; y: number } | null>(null);
@@ -61,10 +63,13 @@ export function ChatInlineImage({ path }: { path: string }) {
   const isMissing =
     resolution === "missing" || (typeof resolution === "object" && !resolution.exists);
   const res = typeof resolution === "object" && resolution.exists ? resolution : null;
-  const workspaceThumb = useAssetObjectUrl(
-    res?.inWorkspace ? boardId : null,
-    res?.inWorkspace ? res.workspaceRelPath ?? null : null,
-    "image/png",
+  const existingPlacementId = addedPlacementId ?? res?.existingPlacementId ?? null;
+  const existingPlacement = existingPlacementId ? placements.get(existingPlacementId) : null;
+  const existingAsset = existingPlacement ? assets.get(existingPlacement.assetId) ?? null : null;
+  const workspaceAssetThumb = useAssetObjectUrl(
+    res?.inWorkspace && existingAsset ? boardId : null,
+    existingAsset?.path ?? null,
+    existingAsset?.mime ?? "image/png",
   );
 
   if (isPending) {
@@ -85,8 +90,9 @@ export function ChatInlineImage({ path }: { path: string }) {
   }
 
   if (!res) return null;
-  const thumbSrc = res.inWorkspace ? workspaceThumb ?? "" : res.thumbDataUrl ?? "";
-  const existingPlacementId = addedPlacementId ?? res.existingPlacementId ?? null;
+  const workspaceProtocolThumb =
+    res.inWorkspace && boardId && res.workspaceRelPath ? cameoUrl(boardId, res.workspaceRelPath) : "";
+  const thumbSrc = res.inWorkspace ? workspaceAssetThumb ?? workspaceProtocolThumb : res.thumbDataUrl ?? "";
 
   // Resolved → render as an actual visible thumbnail (not a chip). Right-click
   // surfaces canvas/reference and file actions.
