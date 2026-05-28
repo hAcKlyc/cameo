@@ -7,6 +7,8 @@ import {
   Map as MapIcon,
   Undo2,
   Redo2,
+  Minus,
+  Plus,
   ChevronDown,
   Square,
   Circle,
@@ -34,6 +36,11 @@ import { ipc } from "./lib/ipc";
 import { buildOverlays } from "./lib/overlay";
 
 const IMAGE_EXTS = ["png", "jpg", "jpeg", "webp", "gif", "bmp", "tif", "tiff", "avif"];
+const CODEX_START_RETRY_DELAYS_MS = [0, 1_000, 3_000];
+
+function wait(ms: number) {
+  return new Promise((resolve) => window.setTimeout(resolve, ms));
+}
 
 async function pickImages() {
   const sel = await open({
@@ -171,7 +178,7 @@ function Toolbar() {
 function Hud() {
   const stats = useUiStore((s) => s.stats);
   const minimapVisible = useUiStore((s) => s.minimapVisible);
-  const sel = useBoardStore((s) => s.selection.size);
+  const canvasZoom = useUiStore((s) => s.canvasZoom);
   const canUndo = useHistoryStore((s) => s.undoStack.length > 0);
   const canRedo = useHistoryStore((s) => s.redoStack.length > 0);
   const t = useT();
@@ -200,9 +207,36 @@ function Hud() {
       >
         <Redo2 size={15} />
       </button>
-      {sel > 0 && <span className="cm-hud__sel">{t("hud.selected", { count: sel })}</span>}
       <span>{stats.fps} fps</span>
-      <span>{Math.round(stats.zoom * 100)}%</span>
+      <span className="cm-hud__zoom" aria-label={`${Math.round(stats.zoom * 100)}%`}>
+        <button
+          className="cm-hud__btn cm-hud__zoombtn"
+          disabled={!canvasZoom}
+          title={t("hud.zoomOut")}
+          aria-label={t("hud.zoomOut")}
+          onClick={() => canvasZoom?.("out")}
+        >
+          <Minus size={13} />
+        </button>
+        <button
+          className="cm-hud__zoomvalue"
+          disabled={!canvasZoom}
+          title={t("hud.zoomReset")}
+          aria-label={t("hud.zoomReset")}
+          onClick={() => canvasZoom?.("reset")}
+        >
+          {Math.round(stats.zoom * 100)}%
+        </button>
+        <button
+          className="cm-hud__btn cm-hud__zoombtn"
+          disabled={!canvasZoom}
+          title={t("hud.zoomIn")}
+          aria-label={t("hud.zoomIn")}
+          onClick={() => canvasZoom?.("in")}
+        >
+          <Plus size={13} />
+        </button>
+      </span>
     </div>
   );
 }
@@ -274,15 +308,29 @@ export default function App() {
 
     const chat = useChatStore.getState();
     chat.reset();
-    chat.setSessionStatus("starting");
-    ipc
-      .startSession(startedBoardId)
-      .then(async () => {
-        if (!isCurrentStart()) return;
-        useChatStore.getState().setSessionStatus("ready");
-        // Load session list + the active session's persisted timeline.
+    void (async () => {
+      try {
+        // Timeline history is Board/Session state, not Codex process state.
+        // Load it before starting the sidecar so a Codex startup failure does
+        // not blank the chat panel.
         await useChatStore.getState().initSessions(startedBoardId, startedRestartNonce);
         if (!isCurrentStart()) return;
+        useChatStore.getState().setSessionStatus("starting");
+        let lastStartError: unknown = null;
+        for (const delayMs of CODEX_START_RETRY_DELAYS_MS) {
+          if (delayMs > 0) await wait(delayMs);
+          if (!isCurrentStart()) return;
+          try {
+            await ipc.startSession(startedBoardId);
+            lastStartError = null;
+            break;
+          } catch (e) {
+            lastStartError = e;
+          }
+        }
+        if (lastStartError) throw lastStartError;
+        if (!isCurrentStart()) return;
+        useChatStore.getState().setSessionStatus("ready");
         // Headless e2e hook: auto-send a prompt if CAMEO_TEST_PROMPT is set.
         const testPrompt = await ipc.initialTestPrompt();
         if (!isCurrentStart()) return;
@@ -313,10 +361,10 @@ export default function App() {
             }
           }
         }
-      })
-      .catch((e) => {
+      } catch (e) {
         if (isCurrentStart()) useChatStore.getState().setSessionStatus("error", String(e));
-      });
+      }
+    })();
     return () => {
       cancelled = true;
       void ipc.stopSession(startedBoardId);
@@ -333,7 +381,7 @@ export default function App() {
           {boardId && <Toolbar />}
           <Hud />
         </div>
-        {boardId && chatOpen && <ChatPanel />}
+        {boardId && chatOpen && <ChatPanel onOpenSettings={() => setSettingsOpen(true)} />}
       </div>
       <EmptyState />
       {settingsOpen && <SettingsModal onClose={() => setSettingsOpen(false)} />}

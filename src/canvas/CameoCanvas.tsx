@@ -90,9 +90,14 @@ export function CameoCanvas() {
       },
     });
     scene.setTool(useUiStore.getState().tool);
+    useUiStore.getState().setCanvasZoom((direction) => {
+      if (direction === "reset") scene.resetZoom();
+      else scene.zoomStep(direction);
+    });
 
     return () => {
       alive = false;
+      useUiStore.getState().setCanvasZoom(null);
       scene.destroy();
       sceneRef.current = null;
     };

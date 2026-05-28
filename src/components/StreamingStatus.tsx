@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import { Loader2 } from "lucide-react";
-import { useChatStore, type ChatMessage } from "../store/chat";
+import { Loader2, WifiOff } from "lucide-react";
+import { useChatStore, type ChatMessage, type TransportStatus } from "../store/chat";
 import { useLocaleStore } from "../i18n/locale";
 import { pickPhrase, fixedPhrase, type PhraseLocale } from "../lib/streamingPhrases";
 
@@ -28,6 +28,7 @@ const PHRASE_ROTATE_MS = 12_000;
 export function StreamingStatus() {
   const turnStatus = useChatStore((s) => s.turnStatus);
   const sessionStatus = useChatStore((s) => s.sessionStatus);
+  const transportStatus = useChatStore((s) => s.transportStatus);
   const lastBlock = useChatStore((s) => {
     const m = lastAssistant(s.messages);
     return m && m.blocks.length > 0 ? m.blocks[m.blocks.length - 1] : null;
@@ -72,6 +73,7 @@ export function StreamingStatus() {
   }, [turnStatus]);
 
   const phrase = useMemo(() => {
+    if (transportStatus) return transportPhrase(locale, transportStatus);
     if (sessionStatus === "starting") return fixedPhrase(locale, "starting");
     if (!lastBlock) return pickPhrase(locale, "general", seed);
     if (lastBlock.type === "thinking" && lastBlock.active) {
@@ -84,19 +86,36 @@ export function StreamingStatus() {
       return pickPhrase(locale, "image", seed);
     }
     return pickPhrase(locale, "general", seed);
-  }, [locale, sessionStatus, lastBlock, seed]);
+  }, [locale, transportStatus, sessionStatus, lastBlock, seed]);
 
   if (turnStatus !== "running") return null;
+  const isTransportNotice = Boolean(transportStatus);
 
   return (
-    <div className="cm-streaming-status" role="status" aria-live="polite">
-      <Loader2 size={12} className="cm-streaming-status__spin" />
+    <div
+      className={`cm-streaming-status${isTransportNotice ? " cm-streaming-status--transport" : ""}`}
+      role="status"
+      aria-live="polite"
+    >
+      {isTransportNotice ? (
+        <WifiOff size={12} className="cm-streaming-status__transport-ico" />
+      ) : (
+        <Loader2 size={12} className="cm-streaming-status__spin" />
+      )}
       <span className="cm-streaming-status__text">{phrase}</span>
       {elapsed >= 3 && (
         <span className="cm-streaming-status__elapsed">{formatElapsed(locale, elapsed)}</span>
       )}
     </div>
   );
+}
+
+function transportPhrase(locale: PhraseLocale, status: TransportStatus): string {
+  if (status.phase === "fallback") {
+    return locale === "zh" ? "连接不稳，已切换 HTTPS 继续" : "Connection unstable, continuing over HTTPS";
+  }
+  const suffix = status.attempt && status.max ? ` ${status.attempt}/${status.max}` : "";
+  return locale === "zh" ? `连接不稳，正在重连${suffix}` : `Connection unstable, reconnecting${suffix}`;
 }
 
 function lastAssistant(messages: ChatMessage[]): Extract<ChatMessage, { role: "assistant" }> | null {

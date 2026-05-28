@@ -22,6 +22,9 @@ function defaultConfig(): AppConfig {
 const sameProxy = (a: ProxySettings, b: ProxySettings) =>
   a.enabled === b.enabled && a.protocol === b.protocol && a.host === b.host && a.port === b.port;
 
+const proxyProtocol = (value: unknown): ProxySettings["protocol"] =>
+  value === "socks5" ? "socks5" : "http";
+
 interface SettingsState {
   config: AppConfig;
   loaded: boolean;
@@ -58,8 +61,9 @@ export const useSettingsStore = create<SettingsState>((set, get) => ({
   load: async () => {
     try {
       const cfg = await ipc.cfgLoad();
+      const rawProxy = cfg?.proxy;
       const merged: AppConfig = {
-        proxy: { ...DEFAULT_PROXY, ...cfg?.proxy },
+        proxy: { ...DEFAULT_PROXY, ...rawProxy, protocol: proxyProtocol(rawProxy?.protocol) },
         telemetry_opt_out: !!cfg?.telemetry_opt_out,
         last_telemetry_date: cfg?.last_telemetry_date ?? null,
         close_to_tray: cfg?.close_to_tray ?? true,

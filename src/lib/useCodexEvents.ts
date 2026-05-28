@@ -31,12 +31,16 @@ export function useCodexEvents() {
       ) {
         board.clearPlaceholders();
       }
+      const wasRunning = useChatStore.getState().turnStatus === "running";
       useChatStore.getState().handleEvent(event);
       // After the turn settles, persist the assistant message + notify the OS
       // (only fires if the window is unfocused).
-      if (event.kind === "turnComplete") {
+      if (
+        wasRunning &&
+        (event.kind === "turnComplete" || event.kind === "sessionComplete" || event.kind === "error")
+      ) {
         useChatStore.getState().persistAssistant();
-        if (event.status === "completed") void notifyTurnDone("生成完成 ✓");
+        if (event.kind === "turnComplete" && event.status === "completed") void notifyTurnDone("生成完成 ✓");
       }
     }).then((u) => {
       if (cancelled) u();

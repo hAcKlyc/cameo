@@ -3,8 +3,10 @@ import { Plus, History, ChevronDown, ChevronUp, X, TriangleAlert, Image as Image
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { useChatStore, type ChatBlock, type ChatMessage, type RateLimit, type SessionStatus } from "../store/chat";
 import { useBoardStore } from "../store/board";
+import { useSettingsStore } from "../store/settings";
 import { CHAT_PANEL_MAX_WIDTH, CHAT_PANEL_MIN_WIDTH, useUiStore } from "../store/ui";
-import { cameoUrl, ipc } from "../lib/ipc";
+import { ipc } from "../lib/ipc";
+import { useAssetObjectUrl } from "../lib/asset-url";
 import type { Shape, CodexInfo } from "../types";
 import { Composer } from "./Composer";
 import { StreamingStatus } from "./StreamingStatus";
@@ -21,6 +23,21 @@ function stem(path: string): string {
   const base = path.split(/[/\\]/).pop() ?? path;
   const s = base.replace(/\.[^.]+$/, "");
   return s.length > 14 ? s.slice(0, 13) + "…" : s;
+}
+
+function BoardAssetImg({
+  boardId,
+  relPath,
+  mime,
+  className,
+}: {
+  boardId: string | null;
+  relPath: string | null;
+  mime?: string | null;
+  className: string;
+}) {
+  const src = useAssetObjectUrl(boardId, relPath, mime);
+  return src ? <img className={className} src={src} alt="" /> : null;
 }
 
 /**
@@ -50,7 +67,7 @@ function UserMessageBody({ text, refs }: { text: string; refs: string[] }) {
     const idx = text.indexOf(a.path, cursor);
     if (idx < 0) continue; // path not in text (rare — manual edit?)
     if (idx > cursor) segments.push({ kind: "text", value: text.slice(cursor, idx) });
-    segments.push({ kind: "pill", pid, path: a.path, url: cameoUrl(boardId, a.path) });
+    segments.push({ kind: "pill", pid, path: a.path, url: null });
     cursor = idx + a.path.length;
   }
   if (cursor < text.length) segments.push({ kind: "text", value: text.slice(cursor) });
@@ -62,7 +79,7 @@ function UserMessageBody({ text, refs }: { text: string; refs: string[] }) {
           <span key={i}>{seg.value}</span>
         ) : (
           <span key={i} className="cm-pill cm-pill--inline" data-pid={seg.pid}>
-            {seg.url && <img src={seg.url} className="cm-pill__img" alt="" />}
+            <BoardAssetImg boardId={boardId} relPath={seg.path} className="cm-pill__img" />
             <span className="cm-pill__label">{stem(seg.path)}</span>
           </span>
         ),
@@ -93,10 +110,9 @@ function MarkStaging() {
       {entries.map(([pid, shapes]) => {
         const p = placements.get(pid);
         const a = p && assets.get(p.assetId);
-        const url = a ? cameoUrl(boardId, a.path) : null;
         return (
           <div className="cm-staging__row" key={pid}>
-            {url && <img className="cm-staging__thumb" src={url} alt="" />}
+            <BoardAssetImg boardId={boardId} relPath={a?.path ?? null} mime={a?.mime} className="cm-staging__thumb" />
             <div className="cm-staging__marks">
               {shapes.map((s, i) => {
                 const key = s.id ?? `${pid}-${i}`;
@@ -216,16 +232,37 @@ function TodoFloat() {
   );
 }
 
-/** Resolve a generated placement → a thumbnail URL (or null). */
-function useThumb() {
+function NetworkWarning({ onOpenSettings }: { onOpenSettings: () => void }) {
+  const t = useT();
+  return (
+    <div className="cm-netwarn" role="status">
+      <TriangleAlert size={13} className="cm-netwarn__ico" />
+      <span className="cm-netwarn__text">{t("chat.networkBlocked")}</span>
+      <button type="button" className="cm-netwarn__link" onClick={onOpenSettings}>
+        {t("chat.networkProxyLink")}
+      </button>
+    </div>
+  );
+}
+
+/** Generated image row backed by Board-scoped object URLs. */
+function GeneratedImageBlock({ placementId }: { placementId: string }) {
+  const t = useT();
   const boardId = useBoardStore((s) => s.boardId);
-  const placements = useBoardStore((s) => s.placements);
-  const assets = useBoardStore((s) => s.assets);
-  return (placementId: string): string | null => {
-    const p = placements.get(placementId);
-    const a = p && assets.get(p.assetId);
-    return a && boardId ? cameoUrl(boardId, a.path) : null;
-  };
+  const placement = useBoardStore((s) => s.placements.get(placementId));
+  const asset = useBoardStore((s) => (placement ? s.assets.get(placement.assetId) : undefined));
+  const url = useAssetObjectUrl(boardId, asset?.path ?? null, asset?.mime);
+
+  return (
+    <button
+      className="cm-genimg"
+      title={t("chat.showOnCanvas")}
+      onClick={() => useBoardStore.getState().revealPlacement(placementId)}
+    >
+      {url && <img className="cm-genimg__thumb" src={url} alt="" />}
+      <span className="cm-genimg__label">{t("chat.generated")}</span>
+    </button>
+  );
 }
 
 const CODEX_INSTALL_CMD = "npm install -g @openai/codex";
@@ -297,6 +334,7 @@ function AgentStatus({ status, rateLimit }: { status: SessionStatus; rateLimit: 
   const [info, setInfo] = useState<CodexInfo | null>(null);
   const [loading, setLoading] = useState(false);
   const ref = useRef<HTMLDivElement>(null);
+  const boardId = useBoardStore((s) => s.boardId);
   const t = useT();
   const lang = useLocaleStore((s) => s.lang);
   const statusLabel = t(`agent.status.${status}` as MsgKey);
@@ -309,6 +347,16 @@ function AgentStatus({ status, rateLimit }: { status: SessionStatus; rateLimit: 
       .catch(() => setInfo({ found: false }))
       .finally(() => setLoading(false));
   }, []);
+
+  const reconnect = useCallback(() => {
+    void (async () => {
+      if (!boardId) return;
+      await ipc.stopSession(boardId).catch(() => { /* best effort */ });
+      if (useBoardStore.getState().boardId !== boardId) return;
+      useSettingsStore.setState((s) => ({ restartNonce: s.restartNonce + 1 }));
+    })();
+    setOpen(false);
+  }, [boardId]);
 
   useEffect(() => {
     if (open && !info) detect();
@@ -385,6 +433,12 @@ function AgentStatus({ status, rateLimit }: { status: SessionStatus; rateLimit: 
                 <RefreshCw size={12} />
                 {t("agent.redetect")}
               </button>
+              {status !== "ready" && status !== "starting" && (
+                <button className="cm-agent-pop__link" onClick={reconnect}>
+                  <RefreshCw size={12} />
+                  {t("agent.reconnect")}
+                </button>
+              )}
             </>
           ) : (
             <>
@@ -468,11 +522,9 @@ function ThinkingRow({ block }: { block: Extract<ChatBlock, { type: "thinking" }
  *  as plain text. */
 function Block({
   block,
-  thumb,
   seenPaths,
 }: {
   block: ChatBlock;
-  thumb: (id: string) => string | null;
   seenPaths?: Set<string>;
 }) {
   const t = useT();
@@ -502,17 +554,7 @@ function Block({
           </div>
         );
       }
-      const url = thumb(block.placementId);
-      return (
-        <button
-          className="cm-genimg"
-          title={t("chat.showOnCanvas")}
-          onClick={() => useBoardStore.getState().revealPlacement(block.placementId)}
-        >
-          {url && <img className="cm-genimg__thumb" src={url} alt="" />}
-          <span className="cm-genimg__label">{t("chat.generated")}</span>
-        </button>
-      );
+      return <GeneratedImageBlock placementId={block.placementId} />;
     }
     case "note":
       return (
@@ -524,9 +566,8 @@ function Block({
   }
 }
 
-function AssistantMessage({ m, thumb }: {
+function AssistantMessage({ m }: {
   m: Extract<ChatMessage, { role: "assistant" }>;
-  thumb: (id: string) => string | null;
 }) {
   // No per-message "Working…" row anymore — replaced by the ambient
   // <StreamingStatus /> at the bottom of the chat panel which stays visible
@@ -544,7 +585,6 @@ function AssistantMessage({ m, thumb }: {
         <Block
           key={b.type === "tool" ? `tool-${b.id}` : `${b.type}-${i}`}
           block={b}
-          thumb={thumb}
           seenPaths={seenPaths}
         />
       ))}
@@ -570,22 +610,57 @@ function TextBlockRender({ text, seenPaths }: { text: string; seenPaths?: Set<st
   return <AssistantMarkdown text={text} seenPaths={seenPaths} />;
 }
 
-export function ChatPanel() {
+export function ChatPanel({ onOpenSettings }: { onOpenSettings: () => void }) {
   const sessionStatus = useChatStore((s) => s.sessionStatus);
   const messages = useChatStore((s) => s.messages);
   const rateLimit = useChatStore((s) => s.rateLimit);
   const chatWidth = useUiStore((s) => s.chatWidth);
   const setChatWidth = useUiStore((s) => s.setChatWidth);
-  const thumb = useThumb();
+  const restartNonce = useSettingsStore((s) => s.restartNonce);
+  const [networkBlocked, setNetworkBlocked] = useState(false);
   const scrollRef = useRef<HTMLDivElement>(null);
   const cleanupResizeRef = useRef<(() => void) | null>(null);
   const resizeFrameRef = useRef<number | null>(null);
   const pendingWidthRef = useRef(chatWidth);
+  const networkProbeGenerationRef = useRef(0);
 
   useEffect(() => {
     const el = scrollRef.current;
     if (el) el.scrollTop = el.scrollHeight;
   }, [messages]);
+
+  useEffect(() => {
+    if (sessionStatus === "starting") {
+      networkProbeGenerationRef.current += 1;
+      setNetworkBlocked(false);
+      return;
+    }
+
+    const generation = networkProbeGenerationRef.current + 1;
+    networkProbeGenerationRef.current = generation;
+    setNetworkBlocked(false);
+
+    const timer = window.setTimeout(() => {
+      void ipc
+        .detectCodex()
+        .then((info) => {
+          if (networkProbeGenerationRef.current !== generation || !info.found) return null;
+          return ipc.probeCodexNetwork();
+        })
+        .then((result) => {
+          if (networkProbeGenerationRef.current !== generation || !result) return;
+          setNetworkBlocked(!result.ok);
+        })
+        .catch(() => {
+          if (networkProbeGenerationRef.current === generation) setNetworkBlocked(true);
+        });
+    }, 600);
+
+    return () => {
+      window.clearTimeout(timer);
+      networkProbeGenerationRef.current += 1;
+    };
+  }, [restartNonce, sessionStatus]);
 
   useEffect(() => {
     return () => {
@@ -659,7 +734,7 @@ export function ChatPanel() {
               <UserMessageBody text={m.text} refs={m.refs} />
             </div>
           ) : (
-            <AssistantMessage m={m} thumb={thumb} key={m.id} />
+            <AssistantMessage m={m} key={m.id} />
           )
         )}
         {/* Ambient indicator — visible the ENTIRE time a turn is running,
@@ -671,6 +746,7 @@ export function ChatPanel() {
       <div className="cm-chat__bottom">
         <TodoFloat />
         <MarkStaging />
+        {networkBlocked && <NetworkWarning onOpenSettings={onOpenSettings} />}
         <Composer />
       </div>
     </div>

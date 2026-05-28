@@ -6,6 +6,7 @@ import type { SceneStats } from "../canvas/scene";
  *  note pin; rect/ellipse/brush drag out a region. */
 export type Tool = "select" | "point" | "rect" | "ellipse" | "brush";
 export type MarkShape = "point" | "rect" | "ellipse" | "brush";
+export type CanvasZoomDirection = "in" | "out" | "reset";
 export const MARK_SHAPES: MarkShape[] = ["point", "rect", "ellipse", "brush"];
 export const isMarkTool = (t: Tool): t is MarkShape => t !== "select";
 export const CHAT_PANEL_MIN_WIDTH = 380;
@@ -35,6 +36,9 @@ interface UiState {
   /** Minimap visibility (default hidden, toggled from the HUD). */
   minimapVisible: boolean;
   toggleMinimap: () => void;
+  /** Imperative canvas zoom hook registered by CameoCanvas while the scene exists. */
+  canvasZoom: ((direction: CanvasZoomDirection) => void) | null;
+  setCanvasZoom: (handler: ((direction: CanvasZoomDirection) => void) | null) => void;
   /** Floating AI panel visibility (toggled from the topbar, like the sidebar). */
   chatOpen: boolean;
   toggleChat: () => void;
@@ -56,6 +60,8 @@ export const useUiStore = create<UiState>((set) => ({
   setCropping: (cropping) => set({ cropping }),
   minimapVisible: false,
   toggleMinimap: () => set((s) => ({ minimapVisible: !s.minimapVisible })),
+  canvasZoom: null,
+  setCanvasZoom: (canvasZoom) => set({ canvasZoom }),
   chatOpen: true,
   toggleChat: () => set((s) => ({ chatOpen: !s.chatOpen })),
   chatWidth: CHAT_PANEL_DEFAULT_WIDTH,

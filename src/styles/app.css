@@ -36,6 +36,7 @@
   --cm-danger-bg: #feecec;
   --cm-danger-strong: #b91c1c;
   --cm-info: #64748b;
+  --cm-info-bg: #eef1f4;
 
   /* ── semantic aliases (components reference these) ────────────────────── */
   --cm-bg: var(--cm-gray-50);
@@ -137,10 +138,13 @@ body,
   position: absolute;
   inset: 0;
   overflow: hidden;
+  overscroll-behavior: none;
+  touch-action: none;
 }
 
 .cm-canvas-host canvas {
   display: block;
+  touch-action: none;
 }
 
 /* ── Topbar (overlay over the canvas) ───────────────────────────────────── */
@@ -378,10 +382,6 @@ body,
   backdrop-filter: blur(8px);
   box-shadow: var(--cm-shadow-1);
 }
-.cm-hud__sel {
-  color: var(--cm-accent);
-  font-weight: 600;
-}
 .cm-hud__btn {
   appearance: none;
   border: none;
@@ -399,6 +399,10 @@ body,
   background: var(--cm-gray-100);
   color: var(--cm-fg);
 }
+.cm-hud__btn:focus-visible {
+  outline: none;
+  box-shadow: var(--cm-focus-ring);
+}
 .cm-hud__btn:disabled {
   opacity: 0.35;
   cursor: default;
@@ -406,6 +410,41 @@ body,
 .cm-hud__btn.is-active {
   color: var(--cm-accent);
   background: var(--cm-accent-bg);
+}
+.cm-hud__zoom {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+}
+.cm-hud__zoombtn {
+  width: 20px;
+  height: 20px;
+  padding: 2px;
+}
+.cm-hud__zoomvalue {
+  appearance: none;
+  border: none;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  cursor: pointer;
+  padding: 2px 4px;
+  border-radius: var(--cm-radius-sm);
+  min-width: 34px;
+  text-align: center;
+  transition: background 0.12s ease, color 0.12s ease;
+}
+.cm-hud__zoomvalue:hover:not(:disabled) {
+  background: var(--cm-gray-100);
+  color: var(--cm-fg);
+}
+.cm-hud__zoomvalue:focus-visible {
+  outline: none;
+  box-shadow: var(--cm-focus-ring);
+}
+.cm-hud__zoomvalue:disabled {
+  opacity: 0.35;
+  cursor: default;
 }
 
 /* ── Chat panel ─────────────────────────────────────────────────────────── */
@@ -1175,6 +1214,13 @@ body.cm-chat-resizing {
   color: var(--cm-muted);
   flex-shrink: 0;
 }
+.cm-streaming-status--transport {
+  color: var(--cm-warning);
+}
+.cm-streaming-status__transport-ico {
+  color: var(--cm-warning);
+  flex-shrink: 0;
+}
 .cm-streaming-status__text {
   /* Subtle fade-in when the phrase swaps. Re-keys via the seed change which
      re-renders the span; CSS transition smooths the opacity but the text is
@@ -1569,6 +1615,39 @@ body.cm-chat-resizing {
 /* Floating todo above the composer (right-aligned, expands upward). */
 .cm-chat__bottom {
   position: relative;
+}
+.cm-netwarn {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  border-top: 1px solid var(--cm-divider);
+  padding: 8px 12px;
+  background: var(--cm-warning-bg);
+  color: var(--cm-fg-secondary);
+  font-size: 12px;
+  line-height: 1.4;
+}
+.cm-netwarn__ico {
+  flex: 0 0 auto;
+  color: var(--cm-warning);
+}
+.cm-netwarn__text {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+.cm-netwarn__link {
+  appearance: none;
+  border: none;
+  background: transparent;
+  color: var(--cm-accent-text);
+  font: inherit;
+  font-weight: 600;
+  padding: 0;
+  cursor: pointer;
+  flex: 0 0 auto;
+}
+.cm-netwarn__link:hover {
+  text-decoration: underline;
 }
 .cm-todo {
   position: absolute;
@@ -2501,6 +2580,39 @@ body.cm-chat-resizing {
 }
 .cm-set-hint--err {
   color: var(--cm-danger);
+}
+.cm-set-probe {
+  display: flex;
+  align-items: flex-start;
+  gap: 6px;
+  margin: 0;
+  padding: 8px 10px;
+  border-radius: var(--cm-radius-md);
+  font-size: 12px;
+  line-height: 1.45;
+}
+.cm-set-probe--checking {
+  background: var(--cm-info-bg);
+  color: var(--cm-info);
+}
+.cm-set-probe--ok {
+  background: var(--cm-success-bg);
+  color: var(--cm-success);
+}
+.cm-set-probe--error {
+  background: var(--cm-danger-bg);
+  color: var(--cm-danger);
+}
+.cm-set-probe__icon {
+  flex: 0 0 auto;
+  margin-top: 1px;
+}
+.cm-set-probe__spin {
+  animation: cm-spin 0.9s linear infinite;
+}
+.cm-set-probe__text {
+  min-width: 0;
+  overflow-wrap: anywhere;
 }
 .cm-code {
   font-family: var(--cm-font-mono);

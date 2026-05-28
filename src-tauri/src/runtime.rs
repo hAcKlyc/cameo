@@ -71,6 +71,13 @@ pub enum UnifiedEvent {
         reached: Option<String>,
     },
     Status { state: String },
+    /// Structured runtime transport state derived inside the runtime adapter.
+    TransportStatus {
+        phase: String,
+        attempt: Option<u64>,
+        max: Option<u64>,
+        message: String,
+    },
     /// Fatal runtime failure. Recoverable runtime diagnostics are `Log` events;
     /// turn state should normally settle through `TurnComplete`.
     Error { message: String },

@@ -104,7 +104,7 @@ export interface PlacementUpdate {
 // Mirrors src-tauri/src/proxy.rs ProxySettings + config.rs AppConfig.
 export interface ProxySettings {
   enabled: boolean;
-  protocol: "http" | "https" | "socks5";
+  protocol: "http" | "socks5";
   host: string;
   port: number;
 }
@@ -117,6 +117,17 @@ export interface AppConfig {
   last_telemetry_date: string | null;
   /** Close window → hide to tray instead of quitting (default true). */
   close_to_tray: boolean;
+}
+
+// Mirrors src-tauri/src/proxy.rs ProxyProbeResult.
+export interface ProxyProbeResult {
+  ok: boolean;
+  stage: string;
+  kind: string;
+  message: string;
+  detail: string | null;
+  httpStatus: number | null;
+  url: string;
 }
 
 // Mirrors src-tauri/src/codex.rs CodexInfo — local Codex CLI detection.
@@ -160,6 +171,13 @@ export type CodexEvent =
       reached?: string | null;
     }
   | { kind: "status"; state: string }
+  | {
+      kind: "transportStatus";
+      phase: "reconnecting" | "fallback";
+      attempt?: number | null;
+      max?: number | null;
+      message: string;
+    }
   /** Fatal runtime failure. Recoverable diagnostics arrive as `log`. */
   | { kind: "error"; message: string }
   | { kind: "sessionComplete"; ok: boolean; message: string }

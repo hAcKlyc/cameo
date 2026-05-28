@@ -65,6 +65,9 @@ const PROGRESS_EVENT_KINDS = new Set<CodexEvent["kind"]>([
 
 export type SessionStatus = "idle" | "starting" | "ready" | "error";
 export type TurnStatus = "idle" | "running";
+export type TransportStatus =
+  | { phase: "reconnecting"; attempt: number | null; max: number | null; message: string }
+  | { phase: "fallback"; message: string };
 
 /** An assistant message is an ORDERED stream of blocks (Riff model): they are
  *  appended in arrival order so the UI renders think → tool → text → think → …
@@ -114,6 +117,8 @@ export interface TurnScope {
 interface ChatState {
   sessionStatus: SessionStatus;
   turnStatus: TurnStatus;
+  /** Recoverable Codex transport notices for the current turn. */
+  transportStatus: TransportStatus | null;
   messages: ChatMessage[];
   error: string | null;
   /** The agent's current plan/todo (turn/plan/updated). */
@@ -239,6 +244,7 @@ function forceRestartSession(
   reason: string,
   opts: { autoRestart?: boolean } = { autoRestart: true },
 ): Partial<ChatState> {
+  const autoRestart = opts.autoRestart ?? true;
   const boardId = useBoardStore.getState().boardId;
   const { activeSessionId, messages } = st;
 
@@ -282,13 +288,14 @@ function forceRestartSession(
     //    (b) the caller explicitly asked NOT to auto-restart (loop breaker
     //    tripped). In either case the local state is already idle so the UI
     //    is usable; just no auto-recovery.
-    if (!opts.autoRestart) return;
+    if (!autoRestart) return;
     if (useBoardStore.getState().boardId !== startedOnBoard) return;
     useSettingsStore.setState((s) => ({ restartNonce: s.restartNonce + 1 }));
   })();
 
   return {
     turnStatus: "idle",
+    transportStatus: null,
     messages: updateLast(messages, (m) => {
       const settled = settle(m);
       const withNote =
@@ -343,6 +350,7 @@ function failLocalTurn(st: ChatState, reason: string, scope?: TurnScope): Partia
 
   return {
     turnStatus: isLatestAssistant ? "idle" : st.turnStatus,
+    transportStatus: isLatestAssistant ? null : st.transportStatus,
     error: isLatestAssistant ? reason : st.error,
     messages: nextMessages,
   };
@@ -428,6 +436,7 @@ const watchdog = new InactivityWatchdog({
 export const useChatStore = create<ChatState>((set, get) => ({
   sessionStatus: "idle",
   turnStatus: "idle",
+  transportStatus: null,
   messages: [],
   error: null,
   plan: null,
@@ -443,6 +452,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
     set({
       sessionStatus: "idle",
       turnStatus: "idle",
+      transportStatus: null,
       messages: [],
       error: null,
       plan: null,
@@ -459,6 +469,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
     const asstMsg: ChatMessage = { id: newId(), role: "assistant", blocks: [], status: "streaming" };
     set((st) => ({
       turnStatus: "running",
+      transportStatus: null,
       messages: [...(st.turnStatus === "running" ? closeOpenAssistant(st.messages) : st.messages), userMsg, asstMsg],
     }));
     // Arm the inactivity watchdog for this turn. Every subsequent runtime
@@ -627,6 +638,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
           watchdog.stop();
           return {
             turnStatus: "idle",
+            transportStatus: null,
             messages: updateLast(st.messages, (m) => ({
               ...settle(m),
               status: e.status === "completed" ? "done" : "error",
@@ -639,6 +651,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
           watchdog.stop();
           return {
             turnStatus: "idle",
+            transportStatus: null,
             error: e.message,
             messages: updateLast(st.messages, (m) => ({ ...settle(m), status: "error", error: e.message })),
           };
@@ -654,6 +667,19 @@ export const useChatStore = create<ChatState>((set, get) => ({
               reached: e.reached,
             },
           };
+        case "transportStatus":
+          if (st.turnStatus !== "running") return {};
+          return {
+            transportStatus:
+              e.phase === "reconnecting"
+                ? {
+                    phase: "reconnecting",
+                    attempt: e.attempt ?? null,
+                    max: e.max ?? null,
+                    message: e.message,
+                  }
+                : { phase: "fallback", message: e.message },
+          };
         case "log":
           // Surface warnings/errors as an inline note block in the stream.
           if (st.turnStatus === "running" && (e.level === "warn" || e.level === "error")) {
@@ -662,23 +688,44 @@ export const useChatStore = create<ChatState>((set, get) => ({
           return {};
         case "sessionComplete": {
           watchdog.stop();
-          // Idle-exit suppression: if the sidecar died BETWEEN turns (no turn
-          // in flight), don't surface an error block — this is usually the OS
-          // killing the long-idle subprocess to reclaim memory, and the next
-          // user send will transparently re-spawn + thread/resume the session.
-          // If a turn WAS in flight, settle that turn's assistant message as
-          // an error so the user understands what happened.
+          // If the sidecar exits, remove the dead registry entry before any
+          // auto-restart. Otherwise start_session may reuse an object whose
+          // child process has already gone away.
+          const reason = e.message || "Codex session ended unexpectedly.";
           if (st.turnStatus !== "running") {
-            return { sessionStatus: "idle", turnStatus: "idle" };
+            const boardId = useBoardStore.getState().boardId;
+            const looping = shouldBreakRestartLoop();
+            void (async () => {
+              if (boardId) await ipc.stopSession(boardId).catch(() => { /* best effort */ });
+              if (!boardId || looping || useBoardStore.getState().boardId !== boardId) return;
+              useSettingsStore.setState((s) => ({ restartNonce: s.restartNonce + 1 }));
+            })();
+            if (looping) {
+              const message =
+                `Codex session exited ${RESTART_LIMIT}+ times within ${RESTART_WINDOW_MS / 60000}min. Please check your network.`;
+              void ipc.frontLog("error", message).catch(() => {});
+              return {
+                sessionStatus: "error",
+                turnStatus: "idle",
+                transportStatus: null,
+                error: message,
+              };
+            }
+            return { sessionStatus: "starting", turnStatus: "idle", transportStatus: null, error: null };
+          }
+          if (shouldBreakRestartLoop()) {
+            const message =
+              `Codex session exited ${RESTART_LIMIT}+ times within ${RESTART_WINDOW_MS / 60000}min. Please check your network.`;
+            void ipc.frontLog("error", message).catch(() => {});
+            return {
+              sessionStatus: "error",
+              error: message,
+              ...forceRestartSession(st, reason, { autoRestart: false }),
+            };
           }
           return {
-            sessionStatus: "idle",
-            turnStatus: "idle",
-            messages: updateLast(st.messages, (m) => ({
-              ...settle(m),
-              status: "error" as const,
-              error: e.message || "Codex session ended unexpectedly.",
-            })),
+            sessionStatus: "starting",
+            ...forceRestartSession(st, reason),
           };
         }
         default:

@@ -3,6 +3,23 @@
 User-facing release notes for Cameo. This file describes what changed from a
 user's point of view, rather than listing internal implementation details.
 
+## [0.1.3] - 2026-05-29
+
+### Improvements
+
+- Canvas navigation feels steadier on desktop and trackpads: Space-drag panning
+  works consistently, zoom gestures are smoother, and the HUD now has quick
+  zoom-out, reset-to-100%, and zoom-in controls.
+- You can keep steering Codex while a turn is running by typing a follow-up and
+  pressing Enter; the visible Stop button now only stops the active conversation.
+- Codex connection recovery is clearer, with better reconnect behavior, proxy
+  diagnostics, and an in-chat warning when Cameo detects that Codex cannot reach
+  the network.
+- Image previews and board image operations are more reliable on Windows,
+  including fallback loading for thumbnails, marked images, and crops.
+
+---
+
 ## [0.1.2] - 2026-05-28
 
 ### Improvements

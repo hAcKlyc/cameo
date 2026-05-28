@@ -21,6 +21,7 @@ src-tauri/gen/schemas/
 # Kept local, out of the public repo.
 .claude/
 .agents/
+/rclone.exe
 
 # Local-only docs (developer thinking / process; NOT part of the open-source repo).
 # Committed specs live at specs/ root (DESIGN.md, ...) and specs/tech_docs/.

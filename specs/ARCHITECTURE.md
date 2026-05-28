@@ -113,8 +113,9 @@ Cameo 是一个**桌面 app**（Tauri 2 + React + PixiJS），把 OpenAI 的 **C
    └───────────────────────────────┘
 ```
 
-- **唯一对外网络** = Codex sidecar。WebView 只读本地 Cameo 图片协议，Rust 后端只读写本地文件（+
-  可选 cloud telemetry / gallery，见 §7）。
+- **常规对外网络** = Codex sidecar。WebView 只读本地 Cameo 图片协议，Rust 后端只读写本地文件（+
+  可选 cloud telemetry / gallery，见 §7）。例外：Rust 会做轻量网络诊断 probe：请求 Google 的
+  `generate_204` 连通性检查地址；不携带账号、prompt 或图片内容。
 - **进程清理纪律**：unix 走 `nix` 进程组 SIGTERM→SIGKILL，win 走 `taskkill /T /F`（`codex.rs`
   里 `kill_tree` 两个 `#[cfg]` 版本）—— 关 app / 换 Board / interrupt turn 都不能留僵尸。
 
@@ -128,8 +129,8 @@ Cameo 是一个**桌面 app**（Tauri 2 + React + PixiJS），把 OpenAI 的 **C
 | 文件 | 行数 | 职责 |
 |---|---:|---|
 | `main.rs` | 5 | 二进制入口，调 `cameo_lib::run()` |
-| `lib.rs` | 167 | **Tauri Builder**：plugin（opener/dialog/notification/updater/process）+ 全局 state（BoardRegistry / CodexRegistry）+ 41 个 command 注册 + Cameo 图片协议 + 窗口关闭→托盘逻辑 |
-| `commands.rs` | 949 | **IPC 桥**：workspace / board / asset / session / codex / config / device / updater / clipboard 的所有命令实现。前端的每个 `ipc.xxx` 在这里有 1:1 对应 |
+| `lib.rs` | 171 | **Tauri Builder**：plugin（opener/dialog/notification/updater/process）+ 全局 state（BoardRegistry / CodexRegistry）+ 41 个 command 注册 + Cameo 图片协议 + 窗口关闭→托盘逻辑 |
+| `commands.rs` | 1263 | **IPC 桥**：workspace / board / asset / session / codex / config / device / updater / clipboard 的所有命令实现。前端的每个 `ipc.xxx` 在这里有 1:1 对应 |
 
 **Board 和文档真相**
 | 文件 | 行数 | 职责 |
@@ -159,7 +160,7 @@ Cameo 是一个**桌面 app**（Tauri 2 + React + PixiJS），把 OpenAI 的 **C
 | 文件 | 行数 | 职责 |
 |---|---:|---|
 | `config.rs` | 61 | `AppConfig`（proxy / close_to_tray / telemetry_opt_out / last_telemetry_date）+ `~/.cameo/config.json` 原子 IO |
-| `proxy.rs` | 166 | HTTP/SOCKS5 代理注入 —— 给 Codex sidecar spawn 时的 env 设 `HTTP(S)_PROXY` / `ALL_PROXY` / `NO_PROXY`。Cameo 唯一会走代理的就是 Codex（WebView 只读本地 Cameo 图片协议）|
+| `proxy.rs` | 819 | HTTP/SOCKS5 代理注入 —— 给 Codex sidecar spawn 时的 env 设 `HTTP(S)_PROXY` / `ALL_PROXY` / `NO_PROXY`；同时提供 Settings / AI 面板的轻量网络诊断 probe（WebView 只读本地 Cameo 图片协议）|
 | `logging.rs` | 56 | `tracing` 双 sink：stderr + 日滚文件（`~/.cameo/logs/cameo.YYYY-MM-DD.log`，保留 14 天）。Rust / 前端 `front_log` / Codex stderr 全部带 `module=` 标签汇在一处 |
 | `device.rs` | 94 | 匿名 device id（UUID v4 持久化到 `~/.cameo/device_id`），cloud telemetry 的锚 |
 | `tray.rs` | 68 | 系统托盘图标 + 菜单。关窗口默认隐藏到托盘（设置可关）；macOS dock reopen 处理 |
@@ -243,6 +244,12 @@ TS 侧镜像于 `src/types.ts::CodexEvent`（serde camelCase wire form）。
 - 用户切换/登出 Codex → Cameo 不感知，Codex sidecar 自己处理。
 - 代理仅注入 Codex sidecar 的 env；保存设置后**自动重启当前 session**（`settings.restartNonce`
   → `App.tsx` 的会话 effect 依赖它）让新代理生效。
+- 代理开关开启且 host / port 有效时，Settings 会触发 `proxy.rs::probe_connectivity`：先连本地
+  代理端口，再按所选协议访问 `http://connectivitycheck.gstatic.com/generate_204`，预期 HTTP 204。
+  结果只用于设置面板的文字反馈，帮助用户发现端口、协议、认证或代理节点问题；不参与 agent 语义。
+- AI 面板启动后会静默触发 `proxy.rs::probe_codex_connectivity`：代理开启时走代理，关闭时直连同一个
+  Google 204 轻量检测。它只是一条网络 / 代理诊断 hint，不等价于 OpenAI/Codex 服务可达性；
+  只有失败才在 Chat 底部露出“设置代理”入口。
 
 详细的 file:line 索引见 `research/research_codex_runtime.md`（maintainer 本地）。
 
@@ -266,10 +273,10 @@ TS 侧镜像于 `src/types.ts::CodexEvent`（serde camelCase wire form）。
 |---|---:|---|
 | `store/board.ts` | 360 | Placement / Asset 的内存镜像；选中、移动、撤销、导入、剪贴板 |
 | `store/chat.ts` | 681 | 消息时间线 + Codex 事件 handler + streaming phrases + watchdog；多会话切换；rate-limit |
-| `store/ui.ts` | 55 | 画布 stats / 面板可见性 / mark 工具状态 / 选中 / 上下文菜单 |
+| `store/ui.ts` | 72 | 画布 stats / 面板可见性 / mark 工具状态 / 选中 / 上下文菜单 |
 | `store/composer.ts` | 39 | 输入草稿 + 引用 pill |
 | `store/history.ts` | 49 | undo / redo 时间线 |
-| `store/settings.ts` | 118 | proxy / close-to-tray / telemetry opt-out / 更新 nonce |
+| `store/settings.ts` | 122 | proxy / close-to-tray / telemetry opt-out / 更新 nonce |
 | `store/workspace.ts` | 74 | 最近工作区 / 当前激活 / sidebar 可见 |
 
 **纪律**：subscribe 用细粒度 selector（`useChatStore(s => s.messages)` 而不是 `useChatStore()`），
@@ -279,8 +286,8 @@ TS 侧镜像于 `src/types.ts::CodexEvent`（serde camelCase wire form）。
 
 | 文件 | 行 | 职责 |
 |---|---:|---|
-| `CameoCanvas.tsx` | 205 | React mount + 桥接 board↔scene；SelectionBar / CropOverlay / CanvasContextMenu 子组件 |
-| `scene.ts` | 1474 | **PixiJS 引擎**：sprite/text 渲染、选区描边、移动手柄、手势（pointer/touch）、crop 模式、标注（点/框/椭圆/涂抹）、纹理缓存、stats（FPS / vertices）、context menu dispatch |
+| `CameoCanvas.tsx` | 233 | React mount + 桥接 board↔scene；SelectionBar / CropOverlay / CanvasContextMenu 子组件 |
+| `scene.ts` | 1969 | **PixiJS 引擎**：sprite/text 渲染、选区描边、移动手柄、手势（pointer/touch）、crop 模式、标注（点/框/椭圆/涂抹）、纹理缓存、stats（FPS / vertices）、context menu dispatch |
 
 **性能纪律**
 - 视口剔除 + LOD / mipmap + TextureGC eviction + 大图不进 atlas + 解码离主线程。
