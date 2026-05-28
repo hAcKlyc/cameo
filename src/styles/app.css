@@ -1178,6 +1178,13 @@ body.cm-chat-resizing {
   color: var(--cm-muted);
   flex-shrink: 0;
 }
+.cm-streaming-status--transport {
+  color: var(--cm-warning);
+}
+.cm-streaming-status__transport-ico {
+  color: var(--cm-warning);
+  flex-shrink: 0;
+}
 .cm-streaming-status__text {
   /* Subtle fade-in when the phrase swaps. Re-keys via the seed change which
      re-renders the span; CSS transition smooths the opacity but the text is

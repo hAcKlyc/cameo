@@ -430,7 +430,12 @@ export function Composer() {
               <Square size={12} fill="currentColor" strokeWidth={0} />
             </button>
           )}
-          <button className="cm-send" title={t("composer.send")} onClick={() => dispatch()} disabled={!ready || !hasContent}>
+          <button
+            className="cm-send"
+            title={ready ? t("composer.send") : t("composer.notReady")}
+            onClick={() => dispatch()}
+            disabled={!ready || !hasContent}
+          >
             <ArrowUp size={18} />
           </button>
         </div>

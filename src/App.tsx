@@ -34,6 +34,11 @@ import { ipc } from "./lib/ipc";
 import { buildOverlays } from "./lib/overlay";
 
 const IMAGE_EXTS = ["png", "jpg", "jpeg", "webp", "gif", "bmp", "tif", "tiff", "avif"];
+const CODEX_START_RETRY_DELAYS_MS = [0, 1_000, 3_000];
+
+function wait(ms: number) {
+  return new Promise((resolve) => window.setTimeout(resolve, ms));
+}
 
 async function pickImages() {
   const sel = await open({
@@ -274,15 +279,29 @@ export default function App() {
 
     const chat = useChatStore.getState();
     chat.reset();
-    chat.setSessionStatus("starting");
-    ipc
-      .startSession(startedBoardId)
-      .then(async () => {
-        if (!isCurrentStart()) return;
-        useChatStore.getState().setSessionStatus("ready");
-        // Load session list + the active session's persisted timeline.
+    void (async () => {
+      try {
+        // Timeline history is Board/Session state, not Codex process state.
+        // Load it before starting the sidecar so a Codex startup failure does
+        // not blank the chat panel.
         await useChatStore.getState().initSessions(startedBoardId, startedRestartNonce);
         if (!isCurrentStart()) return;
+        useChatStore.getState().setSessionStatus("starting");
+        let lastStartError: unknown = null;
+        for (const delayMs of CODEX_START_RETRY_DELAYS_MS) {
+          if (delayMs > 0) await wait(delayMs);
+          if (!isCurrentStart()) return;
+          try {
+            await ipc.startSession(startedBoardId);
+            lastStartError = null;
+            break;
+          } catch (e) {
+            lastStartError = e;
+          }
+        }
+        if (lastStartError) throw lastStartError;
+        if (!isCurrentStart()) return;
+        useChatStore.getState().setSessionStatus("ready");
         // Headless e2e hook: auto-send a prompt if CAMEO_TEST_PROMPT is set.
         const testPrompt = await ipc.initialTestPrompt();
         if (!isCurrentStart()) return;
@@ -313,10 +332,10 @@ export default function App() {
             }
           }
         }
-      })
-      .catch((e) => {
+      } catch (e) {
         if (isCurrentStart()) useChatStore.getState().setSessionStatus("error", String(e));
-      });
+      }
+    })();
     return () => {
       cancelled = true;
       void ipc.stopSession(startedBoardId);

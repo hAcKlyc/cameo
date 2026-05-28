@@ -65,6 +65,9 @@ const PROGRESS_EVENT_KINDS = new Set<CodexEvent["kind"]>([
 
 export type SessionStatus = "idle" | "starting" | "ready" | "error";
 export type TurnStatus = "idle" | "running";
+export type TransportStatus =
+  | { phase: "reconnecting"; attempt: number | null; max: number | null; message: string }
+  | { phase: "fallback"; message: string };
 
 /** An assistant message is an ORDERED stream of blocks (Riff model): they are
  *  appended in arrival order so the UI renders think → tool → text → think → …
@@ -114,6 +117,8 @@ export interface TurnScope {
 interface ChatState {
   sessionStatus: SessionStatus;
   turnStatus: TurnStatus;
+  /** Recoverable Codex transport notices for the current turn. */
+  transportStatus: TransportStatus | null;
   messages: ChatMessage[];
   error: string | null;
   /** The agent's current plan/todo (turn/plan/updated). */
@@ -289,6 +294,7 @@ function forceRestartSession(
 
   return {
     turnStatus: "idle",
+    transportStatus: null,
     messages: updateLast(messages, (m) => {
       const settled = settle(m);
       const withNote =
@@ -343,9 +349,26 @@ function failLocalTurn(st: ChatState, reason: string, scope?: TurnScope): Partia
 
   return {
     turnStatus: isLatestAssistant ? "idle" : st.turnStatus,
+    transportStatus: isLatestAssistant ? null : st.transportStatus,
     error: isLatestAssistant ? reason : st.error,
     messages: nextMessages,
   };
+}
+
+function transportStatusFromLog(message: string): TransportStatus | null {
+  const reconnect = message.match(/^Reconnecting\.\.\.\s*(\d+)\/(\d+)/i);
+  if (reconnect) {
+    return {
+      phase: "reconnecting",
+      attempt: Number(reconnect[1]),
+      max: Number(reconnect[2]),
+      message,
+    };
+  }
+  if (/^Falling back from WebSockets to HTTPS transport\./i.test(message)) {
+    return { phase: "fallback", message };
+  }
+  return null;
 }
 
 /** Record an auto-restart and decide whether the loop breaker should trip. */
@@ -428,6 +451,7 @@ const watchdog = new InactivityWatchdog({
 export const useChatStore = create<ChatState>((set, get) => ({
   sessionStatus: "idle",
   turnStatus: "idle",
+  transportStatus: null,
   messages: [],
   error: null,
   plan: null,
@@ -443,6 +467,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
     set({
       sessionStatus: "idle",
       turnStatus: "idle",
+      transportStatus: null,
       messages: [],
       error: null,
       plan: null,
@@ -459,6 +484,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
     const asstMsg: ChatMessage = { id: newId(), role: "assistant", blocks: [], status: "streaming" };
     set((st) => ({
       turnStatus: "running",
+      transportStatus: null,
       messages: [...(st.turnStatus === "running" ? closeOpenAssistant(st.messages) : st.messages), userMsg, asstMsg],
     }));
     // Arm the inactivity watchdog for this turn. Every subsequent runtime
@@ -627,6 +653,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
           watchdog.stop();
           return {
             turnStatus: "idle",
+            transportStatus: null,
             messages: updateLast(st.messages, (m) => ({
               ...settle(m),
               status: e.status === "completed" ? "done" : "error",
@@ -639,6 +666,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
           watchdog.stop();
           return {
             turnStatus: "idle",
+            transportStatus: null,
             error: e.message,
             messages: updateLast(st.messages, (m) => ({ ...settle(m), status: "error", error: e.message })),
           };
@@ -655,6 +683,10 @@ export const useChatStore = create<ChatState>((set, get) => ({
             },
           };
         case "log":
+          if (st.turnStatus === "running") {
+            const transportStatus = transportStatusFromLog(e.message);
+            if (transportStatus) return { transportStatus };
+          }
           // Surface warnings/errors as an inline note block in the stream.
           if (st.turnStatus === "running" && (e.level === "warn" || e.level === "error")) {
             return { messages: updateLast(st.messages, (m) => pushBlock(m, { type: "note", level: e.level, text: e.message })) };
@@ -669,11 +701,13 @@ export const useChatStore = create<ChatState>((set, get) => ({
           // If a turn WAS in flight, settle that turn's assistant message as
           // an error so the user understands what happened.
           if (st.turnStatus !== "running") {
-            return { sessionStatus: "idle", turnStatus: "idle" };
+            useSettingsStore.setState((s) => ({ restartNonce: s.restartNonce + 1 }));
+            return { sessionStatus: "starting", turnStatus: "idle", transportStatus: null };
           }
           return {
             sessionStatus: "idle",
             turnStatus: "idle",
+            transportStatus: null,
             messages: updateLast(st.messages, (m) => ({
               ...settle(m),
               status: "error" as const,

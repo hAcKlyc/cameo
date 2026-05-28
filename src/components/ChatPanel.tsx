@@ -3,6 +3,7 @@ import { Plus, History, ChevronDown, ChevronUp, X, TriangleAlert, Image as Image
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { useChatStore, type ChatBlock, type ChatMessage, type RateLimit, type SessionStatus } from "../store/chat";
 import { useBoardStore } from "../store/board";
+import { useSettingsStore } from "../store/settings";
 import { CHAT_PANEL_MAX_WIDTH, CHAT_PANEL_MIN_WIDTH, useUiStore } from "../store/ui";
 import { ipc } from "../lib/ipc";
 import { useAssetObjectUrl } from "../lib/asset-url";
@@ -333,6 +334,11 @@ function AgentStatus({ status, rateLimit }: { status: SessionStatus; rateLimit: 
       .finally(() => setLoading(false));
   }, []);
 
+  const reconnect = useCallback(() => {
+    useSettingsStore.setState((s) => ({ restartNonce: s.restartNonce + 1 }));
+    setOpen(false);
+  }, []);
+
   useEffect(() => {
     if (open && !info) detect();
   }, [open, info, detect]);
@@ -408,6 +414,12 @@ function AgentStatus({ status, rateLimit }: { status: SessionStatus; rateLimit: 
                 <RefreshCw size={12} />
                 {t("agent.redetect")}
               </button>
+              {status !== "ready" && status !== "starting" && (
+                <button className="cm-agent-pop__link" onClick={reconnect}>
+                  <RefreshCw size={12} />
+                  {t("agent.reconnect")}
+                </button>
+              )}
             </>
           ) : (
             <>
