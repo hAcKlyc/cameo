@@ -4,6 +4,7 @@ import { openUrl } from "@tauri-apps/plugin-opener";
 import { useChatStore, type ChatBlock, type ChatMessage, type RateLimit, type SessionStatus } from "../store/chat";
 import { useBoardStore } from "../store/board";
 import { CHAT_PANEL_MAX_WIDTH, CHAT_PANEL_MIN_WIDTH, useUiStore } from "../store/ui";
+import { useSettingsStore } from "../store/settings";
 import { cameoUrl, ipc } from "../lib/ipc";
 import type { Shape, CodexInfo } from "../types";
 import { Composer } from "./Composer";
@@ -211,6 +212,19 @@ function TodoFloat() {
       <button className="cm-todo__bar" onClick={() => setOpen((o) => !o)}>
         <span className="cm-todo__chev">{open ? <ChevronDown size={12} /> : <ChevronUp size={12} />}</span>
         <span>{t("chat.todo", { done, total })}</span>
+      </button>
+    </div>
+  );
+}
+
+function NetworkWarning({ onOpenSettings }: { onOpenSettings: () => void }) {
+  const t = useT();
+  return (
+    <div className="cm-netwarn" role="status">
+      <TriangleAlert size={13} className="cm-netwarn__ico" />
+      <span className="cm-netwarn__text">{t("chat.networkBlocked")}</span>
+      <button type="button" className="cm-netwarn__link" onClick={onOpenSettings}>
+        {t("chat.networkProxyLink")}
       </button>
     </div>
   );
@@ -570,22 +584,58 @@ function TextBlockRender({ text, seenPaths }: { text: string; seenPaths?: Set<st
   return <AssistantMarkdown text={text} seenPaths={seenPaths} />;
 }
 
-export function ChatPanel() {
+export function ChatPanel({ onOpenSettings }: { onOpenSettings: () => void }) {
   const sessionStatus = useChatStore((s) => s.sessionStatus);
   const messages = useChatStore((s) => s.messages);
   const rateLimit = useChatStore((s) => s.rateLimit);
   const chatWidth = useUiStore((s) => s.chatWidth);
   const setChatWidth = useUiStore((s) => s.setChatWidth);
+  const restartNonce = useSettingsStore((s) => s.restartNonce);
+  const [networkBlocked, setNetworkBlocked] = useState(false);
   const thumb = useThumb();
   const scrollRef = useRef<HTMLDivElement>(null);
   const cleanupResizeRef = useRef<(() => void) | null>(null);
   const resizeFrameRef = useRef<number | null>(null);
   const pendingWidthRef = useRef(chatWidth);
+  const networkProbeGenerationRef = useRef(0);
 
   useEffect(() => {
     const el = scrollRef.current;
     if (el) el.scrollTop = el.scrollHeight;
   }, [messages]);
+
+  useEffect(() => {
+    if (sessionStatus === "starting") {
+      networkProbeGenerationRef.current += 1;
+      setNetworkBlocked(false);
+      return;
+    }
+
+    const generation = networkProbeGenerationRef.current + 1;
+    networkProbeGenerationRef.current = generation;
+    setNetworkBlocked(false);
+
+    const timer = window.setTimeout(() => {
+      void ipc
+        .detectCodex()
+        .then((info) => {
+          if (networkProbeGenerationRef.current !== generation || !info.found) return null;
+          return ipc.probeCodexNetwork();
+        })
+        .then((result) => {
+          if (networkProbeGenerationRef.current !== generation || !result) return;
+          setNetworkBlocked(!result.ok);
+        })
+        .catch(() => {
+          if (networkProbeGenerationRef.current === generation) setNetworkBlocked(true);
+        });
+    }, 600);
+
+    return () => {
+      window.clearTimeout(timer);
+      networkProbeGenerationRef.current += 1;
+    };
+  }, [restartNonce, sessionStatus]);
 
   useEffect(() => {
     return () => {
@@ -671,6 +721,7 @@ export function ChatPanel() {
       <div className="cm-chat__bottom">
         <TodoFloat />
         <MarkStaging />
+        {networkBlocked && <NetworkWarning onOpenSettings={onOpenSettings} />}
         <Composer />
       </div>
     </div>

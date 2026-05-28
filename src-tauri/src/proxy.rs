@@ -33,8 +33,11 @@ const LOCALHOST_NO_PROXY: &str = "localhost,localhost.localdomain,127.0.0.1,127.
 
 const ALLOWED_PROTOCOLS: &[&str] = &["http", "https", "socks5"];
 
-const PROBE_TARGET_HOST: &str = "chatgpt.com";
-const PROBE_TARGET_PORT: u16 = 443;
+pub const GOOGLE_CONNECTIVITY_CHECK_URL: &str = "http://connectivitycheck.gstatic.com/generate_204";
+
+const PROBE_TARGET_HOST: &str = "connectivitycheck.gstatic.com";
+const PROBE_TARGET_PATH: &str = "/generate_204";
+const PROBE_TARGET_PORT: u16 = 80;
 const PROBE_CONNECT_TIMEOUT_MS: u64 = 1_500;
 const PROBE_HANDSHAKE_TIMEOUT_MS: u64 = 5_000;
 const PROBE_USER_AGENT: &str = "Cameo-Proxy-Probe/1.0";
@@ -155,8 +158,8 @@ fn probe_result(
 }
 
 /// Probe the proxy endpoint currently shown in Settings. The probe connects to
-/// the configured local proxy first, then performs the protocol-level CONNECT
-/// handshake Codex needs for HTTPS / WSS traffic.
+/// the configured local proxy first, then asks Google's lightweight connectivity
+/// endpoint for a 204 response through that proxy.
 pub async fn probe_connectivity(protocol: String, host: String, port: u16) -> ProxyProbeResult {
     let protocol = protocol.trim().to_lowercase();
     let host = host.trim().to_string();
@@ -231,10 +234,63 @@ pub async fn probe_connectivity(protocol: String, host: String, port: u16) -> Pr
     };
 
     match protocol.as_str() {
-        "http" => probe_http_connect(stream, &proxy_url).await,
-        "socks5" => probe_socks5_connect(stream, &proxy_url).await,
+        "http" => probe_http_proxy_get(stream, &proxy_url).await,
+        "socks5" => probe_socks5_proxy_get(stream, &proxy_url).await,
         _ => unreachable!("protocol was validated above"),
     }
+}
+
+/// Probe the network path Codex will use right now: direct when proxy is off,
+/// or through the configured proxy when proxy is on.
+pub async fn probe_codex_connectivity(cfg: &ProxySettings) -> ProxyProbeResult {
+    if cfg.enabled {
+        return probe_connectivity(cfg.protocol.clone(), cfg.host.clone(), cfg.port).await;
+    }
+
+    tracing::info!(
+        module = "proxy",
+        url = GOOGLE_CONNECTIVITY_CHECK_URL,
+        "probing direct internet connectivity"
+    );
+
+    let stream = match timeout(
+        Duration::from_millis(PROBE_CONNECT_TIMEOUT_MS),
+        TcpStream::connect((PROBE_TARGET_HOST, PROBE_TARGET_PORT)),
+    )
+    .await
+    {
+        Ok(Ok(stream)) => stream,
+        Ok(Err(e)) => {
+            return probe_result(
+                false,
+                "external_http",
+                "internet_unreachable",
+                "Cannot reach the internet connectivity check",
+                Some(e.to_string()),
+                None,
+                GOOGLE_CONNECTIVITY_CHECK_URL,
+            );
+        }
+        Err(_) => {
+            return probe_result(
+                false,
+                "external_http",
+                "timeout",
+                "Timed out reaching the internet connectivity check",
+                None,
+                None,
+                GOOGLE_CONNECTIVITY_CHECK_URL,
+            );
+        }
+    };
+
+    send_generate_204_request(
+        stream,
+        PROBE_TARGET_PATH,
+        "external_http",
+        GOOGLE_CONNECTIVITY_CHECK_URL,
+    )
+    .await
 }
 
 async fn write_probe(stream: &mut TcpStream, bytes: &[u8]) -> Result<(), String> {
@@ -276,21 +332,25 @@ async fn read_exact_probe(stream: &mut TcpStream, buf: &mut [u8]) -> Result<(), 
     }
 }
 
-async fn probe_http_connect(mut stream: TcpStream, proxy_url: &str) -> ProxyProbeResult {
-    let target = format!("{PROBE_TARGET_HOST}:{PROBE_TARGET_PORT}");
+async fn send_generate_204_request(
+    mut stream: TcpStream,
+    request_target: &str,
+    stage: &str,
+    url: &str,
+) -> ProxyProbeResult {
     let request = format!(
-        "CONNECT {target} HTTP/1.1\r\nHost: {target}\r\nUser-Agent: {PROBE_USER_AGENT}\r\nProxy-Connection: close\r\n\r\n"
+        "HEAD {request_target} HTTP/1.1\r\nHost: {PROBE_TARGET_HOST}\r\nUser-Agent: {PROBE_USER_AGENT}\r\nConnection: close\r\n\r\n"
     );
 
     if let Err(e) = write_probe(&mut stream, request.as_bytes()).await {
         return probe_result(
             false,
-            "local_proxy",
-            "protocol_mismatch",
-            "Connected to the port, but it did not accept an HTTP proxy request",
+            stage,
+            "network_error",
+            "Could not write the connectivity probe request",
             Some(e),
             None,
-            proxy_url,
+            url,
         );
     }
 
@@ -299,77 +359,96 @@ async fn probe_http_connect(mut stream: TcpStream, proxy_url: &str) -> ProxyProb
         Ok(0) => {
             return probe_result(
                 false,
-                "local_proxy",
-                "protocol_mismatch",
-                "Connected to the port, but the HTTP proxy closed without a response",
+                stage,
+                "network_error",
+                "The connectivity probe closed without a response",
                 None,
                 None,
-                proxy_url,
+                url,
             );
         }
         Ok(n) => n,
         Err(e) => {
             return probe_result(
                 false,
-                "external_connect",
+                stage,
                 if e == "timeout" {
                     "timeout"
                 } else {
-                    "upstream_unreachable"
+                    "network_error"
                 },
-                "The local proxy did not complete the CONNECT probe",
+                "The connectivity probe did not complete",
                 Some(e),
                 None,
-                proxy_url,
+                url,
             );
         }
     };
 
     let response = String::from_utf8_lossy(&buf[..n]);
-    let status = parse_http_connect_status(&response);
+    let status = parse_http_status(&response);
     let first_line = first_response_line(&response);
 
     match status {
-        Some(code) if (200..300).contains(&code) => probe_result(
+        Some(204) => probe_result(
             true,
-            "external_connect",
-            "proxy_reachable",
-            "Proxy is reachable",
-            Some(format!("{proxy_url} -> {target}")),
-            Some(code),
-            proxy_url,
+            stage,
+            "internet_reachable",
+            "Internet connectivity check returned 204",
+            Some(GOOGLE_CONNECTIVITY_CHECK_URL.to_string()),
+            Some(204),
+            url,
         ),
         Some(407) => probe_result(
             false,
-            "local_proxy",
+            stage,
             "proxy_auth_required",
             "The proxy requires authentication",
             Some(first_line),
             Some(407),
-            proxy_url,
+            url,
+        ),
+        Some(code) if (300..400).contains(&code) => probe_result(
+            false,
+            stage,
+            "captive_portal",
+            "Connectivity check was redirected",
+            Some(first_line),
+            Some(code),
+            url,
         ),
         Some(code) => probe_result(
             false,
-            "external_connect",
-            "upstream_unreachable",
-            "The local proxy responded but could not reach the target",
+            stage,
+            "unexpected_status",
+            "Connectivity check returned an unexpected HTTP status",
             Some(first_line),
             Some(code),
-            proxy_url,
+            url,
         ),
         None => probe_result(
             false,
-            "local_proxy",
+            stage,
             "protocol_mismatch",
-            "Connected to the port, but it did not look like an HTTP proxy",
+            "Connectivity check response did not look like HTTP",
             Some(first_line),
             None,
-            proxy_url,
+            url,
         ),
     }
 }
 
-async fn probe_socks5_connect(mut stream: TcpStream, proxy_url: &str) -> ProxyProbeResult {
+async fn probe_http_proxy_get(stream: TcpStream, proxy_url: &str) -> ProxyProbeResult {
+    send_generate_204_request(
+        stream,
+        GOOGLE_CONNECTIVITY_CHECK_URL,
+        "external_http",
+        proxy_url,
+    )
+    .await
+}
+
+async fn probe_socks5_proxy_get(mut stream: TcpStream, proxy_url: &str) -> ProxyProbeResult {
     if let Err(e) = write_probe(&mut stream, &[0x05, 0x01, 0x00]).await {
         return probe_result(
             false,
@@ -490,17 +569,7 @@ async fn probe_socks5_connect(mut stream: TcpStream, proxy_url: &str) -> ProxyPr
     }
 
     match drain_socks5_bind_addr(&mut stream, head[3]).await {
-        Ok(()) => probe_result(
-            true,
-            "external_connect",
-            "proxy_reachable",
-            "Proxy is reachable",
-            Some(format!(
-                "{proxy_url} -> {PROBE_TARGET_HOST}:{PROBE_TARGET_PORT}"
-            )),
-            None,
-            proxy_url,
-        ),
+        Ok(()) => send_generate_204_request(stream, PROBE_TARGET_PATH, "external_http", proxy_url).await,
         Err(e) => probe_result(
             false,
             "external_connect",
@@ -528,7 +597,7 @@ async fn drain_socks5_bind_addr(stream: &mut TcpStream, atyp: u8) -> Result<(), 
     read_exact_probe(stream, &mut rest).await
 }
 
-fn parse_http_connect_status(response: &str) -> Option<u16> {
+fn parse_http_status(response: &str) -> Option<u16> {
     let mut parts = response.lines().next()?.split_whitespace();
     let version = parts.next()?;
     if !version.starts_with("HTTP/") {
@@ -615,16 +684,13 @@ mod tests {
     }
 
     #[test]
-    fn http_connect_status_parses_success() {
-        assert_eq!(
-            parse_http_connect_status("HTTP/1.1 200 Connection Established\r\n\r\n"),
-            Some(200)
-        );
+    fn http_status_parses_success() {
+        assert_eq!(parse_http_status("HTTP/1.1 204 No Content\r\n\r\n"), Some(204));
     }
 
     #[test]
-    fn http_connect_status_rejects_non_http() {
-        assert_eq!(parse_http_connect_status("SOCKS5"), None);
+    fn http_status_rejects_non_http() {
+        assert_eq!(parse_http_status("SOCKS5"), None);
     }
 
     #[test]

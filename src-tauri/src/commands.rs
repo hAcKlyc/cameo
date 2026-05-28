@@ -1213,6 +1213,14 @@ pub async fn probe_proxy(
     crate::proxy::probe_connectivity(protocol, host, port).await
 }
 
+/// Probe the network path the Codex sidecar will use: direct, or through the
+/// configured proxy when proxy is enabled.
+#[tauri::command]
+pub async fn probe_codex_network() -> crate::proxy::ProxyProbeResult {
+    let cfg = crate::config::load();
+    crate::proxy::probe_codex_connectivity(&cfg.proxy).await
+}
+
 /// Open the unified log folder (`~/.cameo/logs`) in the OS file manager.
 #[tauri::command]
 pub fn open_logs_dir() -> Result<(), String> {

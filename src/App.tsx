@@ -362,7 +362,7 @@ export default function App() {
           {boardId && <Toolbar />}
           <Hud />
         </div>
-        {boardId && chatOpen && <ChatPanel />}
+        {boardId && chatOpen && <ChatPanel onOpenSettings={() => setSettingsOpen(true)} />}
       </div>
       <EmptyState />
       {settingsOpen && <SettingsModal onClose={() => setSettingsOpen(false)} />}

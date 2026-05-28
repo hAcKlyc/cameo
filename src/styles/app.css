@@ -1606,6 +1606,39 @@ body.cm-chat-resizing {
 .cm-chat__bottom {
   position: relative;
 }
+.cm-netwarn {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  border-top: 1px solid var(--cm-divider);
+  padding: 8px 12px;
+  background: var(--cm-warning-bg);
+  color: var(--cm-fg-secondary);
+  font-size: 12px;
+  line-height: 1.4;
+}
+.cm-netwarn__ico {
+  flex: 0 0 auto;
+  color: var(--cm-warning);
+}
+.cm-netwarn__text {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+.cm-netwarn__link {
+  appearance: none;
+  border: none;
+  background: transparent;
+  color: var(--cm-accent-text);
+  font: inherit;
+  font-weight: 600;
+  padding: 0;
+  cursor: pointer;
+  flex: 0 0 auto;
+}
+.cm-netwarn__link:hover {
+  text-decoration: underline;
+}
 .cm-todo {
   position: absolute;
   bottom: 100%;

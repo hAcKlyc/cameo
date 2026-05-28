@@ -104,6 +104,7 @@ export const ipc = {
   cfgSave: (config: AppConfig) => invoke<void>("cfg_save", { config }),
   probeProxy: (protocol: ProxySettings["protocol"], host: string, port: number) =>
     invoke<ProxyProbeResult>("probe_proxy", { protocol, host, port }),
+  probeCodexNetwork: () => invoke<ProxyProbeResult>("probe_codex_network"),
   /** Anonymous install identity (UUID v4). Generated on first call. */
   deviceIdGet: () => invoke<string>("device_id_get"),
   /** Wipe ~/.cameo/device_id; next launch mints a new one. */

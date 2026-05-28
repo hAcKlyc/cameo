@@ -33,6 +33,10 @@ function proxyProbeMessageKey(kind: string): MsgKey {
     case "proxy_auth_required":
       return "settings.proxyProbe.authRequired";
     case "upstream_unreachable":
+    case "internet_unreachable":
+    case "network_error":
+    case "unexpected_status":
+    case "captive_portal":
       return "settings.proxyProbe.upstreamBlocked";
     default:
       return "settings.proxyProbe.error";
