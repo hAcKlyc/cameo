@@ -30,7 +30,7 @@ use std::sync::Arc;
 use std::sync::OnceLock;
 use std::time::{Duration, Instant};
 use tauri::{AppHandle, Emitter};
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader, Lines};
 use tokio::process::{Child, ChildStdin, ChildStdout};
 use tokio::sync::oneshot;
 use tokio::sync::Mutex as TokioMutex;
@@ -40,6 +40,8 @@ use tokio::sync::Mutex as TokioMutex;
 #[cfg(not(windows))]
 const SHELL_PATH_TIMEOUT: Duration = Duration::from_secs(3);
 const VERSION_TIMEOUT: Duration = Duration::from_secs(5);
+const AUTH_PROBE_TIMEOUT: Duration = Duration::from_secs(10);
+const AUTH_PROBE_INIT_TIMEOUT: Duration = Duration::from_secs(15);
 
 #[derive(Debug, Clone)]
 struct ResolvedCodex {
@@ -288,6 +290,17 @@ pub struct CodexInfo {
     pub version: Option<String>,
 }
 
+/// Structured auth status from Codex app-server `getAuthStatus`. Never includes
+/// tokens; Cameo only needs to know whether the user's local Codex can run.
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CodexAuthStatus {
+    pub auth_method: Option<String>,
+    pub requires_openai_auth: bool,
+    pub requires_login: bool,
+    pub auth_supported: bool,
+}
+
 pub fn detect() -> CodexInfo {
     match resolve_codex() {
         Ok(resolved) => {
@@ -314,6 +327,383 @@ pub fn detect() -> CodexInfo {
             version: None,
         },
     }
+}
+
+fn parse_auth_status(res: &Value) -> CodexAuthStatus {
+    let auth_method = res
+        .get("authMethod")
+        .and_then(|v| v.as_str())
+        .map(String::from);
+    let requires_openai_auth = res
+        .get("requiresOpenaiAuth")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+    let auth_supported = is_supported_auth_method(auth_method.as_deref());
+    CodexAuthStatus {
+        requires_login: auth_method.is_none() && requires_openai_auth,
+        auth_supported,
+        auth_method,
+        requires_openai_auth,
+    }
+}
+
+fn is_supported_auth_method(method: Option<&str>) -> bool {
+    matches!(
+        method,
+        Some("chatgpt" | "chatgptAuthTokens" | "agentIdentity")
+    )
+}
+
+fn is_rpc_response_for(msg: &Value, id: u64) -> bool {
+    msg.get("id").and_then(|v| v.as_u64()) == Some(id) && msg.get("method").is_none()
+}
+
+async fn probe_call(
+    stdin: &mut ChildStdin,
+    lines: &mut Lines<BufReader<ChildStdout>>,
+    id: u64,
+    method: &str,
+    params: Value,
+    timeout: Duration,
+) -> Result<Value, String> {
+    let line = format!(
+        "{}\n",
+        serde_json::to_string(&json!({
+            "jsonrpc": "2.0",
+            "id": id,
+            "method": method,
+            "params": params,
+        }))
+        .map_err(|e| e.to_string())?
+    );
+    stdin
+        .write_all(line.as_bytes())
+        .await
+        .map_err(|e| e.to_string())?;
+    stdin.flush().await.map_err(|e| e.to_string())?;
+
+    let wait_for_response = async {
+        loop {
+            let Some(line) = lines.next_line().await.map_err(|e| e.to_string())? else {
+                return Err("codex app-server exited during auth probe".to_string());
+            };
+            let line = line.trim();
+            if line.is_empty() {
+                continue;
+            }
+            let Ok(msg) = serde_json::from_str::<Value>(line) else {
+                continue;
+            };
+            if !is_rpc_response_for(&msg, id) {
+                continue;
+            }
+            if let Some(err) = msg.get("error") {
+                return Err(compact_json(err, 500));
+            }
+            return Ok(msg.get("result").cloned().unwrap_or(Value::Null));
+        }
+    };
+
+    tokio::time::timeout(timeout, wait_for_response)
+        .await
+        .map_err(|_| format!("rpc '{method}' timed out after {}ms", timeout.as_millis()))?
+}
+
+async fn probe_notify(stdin: &mut ChildStdin, method: &str, params: Value) {
+    let Ok(line) = serde_json::to_string(&json!({
+        "jsonrpc": "2.0",
+        "method": method,
+        "params": params,
+    })) else {
+        return;
+    };
+    let _ = stdin.write_all(format!("{line}\n").as_bytes()).await;
+    let _ = stdin.flush().await;
+}
+
+async fn cleanup_probe_child(child: &mut Child, pid: u32) {
+    #[cfg(unix)]
+    {
+        kill_tree(pid, 15);
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        kill_tree(pid, 9);
+    }
+    #[cfg(not(unix))]
+    kill_tree(pid, 9);
+    let _ = child.start_kill();
+    let _ = child.wait().await;
+}
+
+/// Probe local Codex auth without requiring an open Board session. This is used
+/// by the status popover before `thread/start`, so "installed but not logged in"
+/// can be shown as its own product state.
+pub async fn probe_auth() -> Result<CodexAuthStatus, String> {
+    let codex = resolve_codex()?;
+    let mut cmd = tokio::process::Command::new(&codex.path);
+    crate::process::hide_tokio_console_window(&mut cmd);
+    cmd.arg("app-server")
+        .env("PATH", &codex.search_path)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null());
+    crate::proxy::apply_to_subprocess(&mut cmd, Some(&crate::config::load().proxy));
+    #[cfg(unix)]
+    {
+        cmd.process_group(0);
+    }
+
+    let mut child = cmd
+        .spawn()
+        .map_err(|e| format!("spawn codex app-server for auth probe: {e}"))?;
+    let pid = child.id().unwrap_or(0);
+    let Some(mut stdin) = child.stdin.take() else {
+        cleanup_probe_child(&mut child, pid).await;
+        return Err("auth probe: no stdin".into());
+    };
+    let Some(stdout) = child.stdout.take() else {
+        cleanup_probe_child(&mut child, pid).await;
+        return Err("auth probe: no stdout".into());
+    };
+    let mut lines = BufReader::new(stdout).lines();
+
+    let result = async {
+        probe_call(
+            &mut stdin,
+            &mut lines,
+            1,
+            "initialize",
+            json!({
+                "clientInfo": { "name": "Cameo", "title": null, "version": env!("CARGO_PKG_VERSION") },
+                "capabilities": null
+            }),
+            AUTH_PROBE_INIT_TIMEOUT,
+        )
+        .await?;
+        probe_notify(&mut stdin, "initialized", json!({})).await;
+        let auth = probe_call(
+            &mut stdin,
+            &mut lines,
+            2,
+            "getAuthStatus",
+            json!({ "includeToken": false, "refreshToken": false }),
+            AUTH_PROBE_TIMEOUT,
+        )
+        .await?;
+        Ok(parse_auth_status(&auth))
+    }
+    .await;
+
+    cleanup_probe_child(&mut child, pid).await;
+    result
+}
+
+#[cfg(not(windows))]
+fn sh_quote(value: &str) -> String {
+    format!("'{}'", value.replace('\'', "'\\''"))
+}
+
+#[cfg(windows)]
+fn batch_escape(value: &str) -> String {
+    value.replace('%', "%%").replace('"', "")
+}
+
+fn terminal_script_dir() -> Result<PathBuf, String> {
+    let dir = crate::paths::cameo_data_dir().join("terminal");
+    std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+    prune_terminal_scripts(&dir);
+    Ok(dir)
+}
+
+fn prune_terminal_scripts(dir: &Path) {
+    const MAX_AGE: Duration = Duration::from_secs(7 * 24 * 60 * 60);
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    for entry in entries.filter_map(Result::ok) {
+        let path = entry.path();
+        let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
+            continue;
+        };
+        let is_terminal_script = name.starts_with("cameo-codex-")
+            && matches!(
+                path.extension().and_then(|e| e.to_str()),
+                Some("command" | "cmd")
+            );
+        if !is_terminal_script {
+            continue;
+        }
+        let old = entry
+            .metadata()
+            .and_then(|m| m.modified())
+            .ok()
+            .and_then(|modified| modified.elapsed().ok())
+            .map(|age| age > MAX_AGE)
+            .unwrap_or(false);
+        if old {
+            let _ = std::fs::remove_file(path);
+        }
+    }
+}
+
+#[cfg(not(windows))]
+fn write_unix_terminal_script(stem: &str, body: &str) -> Result<PathBuf, String> {
+    use std::os::unix::fs::PermissionsExt;
+    let path = terminal_script_dir()?.join(format!("{stem}-{}.command", uuid::Uuid::new_v4()));
+    std::fs::write(&path, body).map_err(|e| e.to_string())?;
+    let mut perms = std::fs::metadata(&path)
+        .map_err(|e| e.to_string())?
+        .permissions();
+    perms.set_mode(0o700);
+    std::fs::set_permissions(&path, perms).map_err(|e| e.to_string())?;
+    Ok(path)
+}
+
+#[cfg(windows)]
+fn write_windows_terminal_script(stem: &str, body: &str) -> Result<PathBuf, String> {
+    let path = terminal_script_dir()?.join(format!("{stem}-{}.cmd", uuid::Uuid::new_v4()));
+    std::fs::write(&path, body).map_err(|e| e.to_string())?;
+    Ok(path)
+}
+
+fn open_terminal_script(path: &Path) -> Result<(), String> {
+    #[cfg(target_os = "macos")]
+    {
+        return tauri_plugin_opener::open_path(path, None::<&str>).map_err(|e| e.to_string());
+    }
+
+    #[cfg(windows)]
+    {
+        std::process::Command::new("cmd")
+            .arg("/C")
+            .arg("start")
+            .arg("")
+            .arg(path)
+            .spawn()
+            .map_err(|e| e.to_string())?;
+        return Ok(());
+    }
+
+    #[cfg(all(unix, not(target_os = "macos")))]
+    {
+        tauri_plugin_opener::open_path(path, None::<&str>).map_err(|e| e.to_string())
+    }
+}
+
+/// Open a visible terminal that installs the user's local Codex CLI.
+pub fn open_install_terminal() -> Result<(), String> {
+    let search_path = build_augmented_path(true);
+
+    #[cfg(not(windows))]
+    let script = {
+        let path = sh_quote(&search_path);
+        format!(
+            r#"#!/bin/zsh
+set +e
+export PATH={path}
+echo "Cameo is installing Codex CLI..."
+echo
+npm install -g @openai/codex
+status=$?
+echo
+if [ "$status" -eq 0 ]; then
+  echo "Verifying installation..."
+  hash -r
+  codex --version
+  echo
+  echo "Next: return to Cameo and click Re-detect."
+else
+  echo "Install failed with exit code $status."
+  echo "Check the terminal output above, then retry."
+fi
+echo
+echo "Press any key to close this window."
+read -rsn 1
+"#
+        )
+    };
+
+    #[cfg(windows)]
+    let script = {
+        let path = batch_escape(&search_path);
+        format!(
+            r#"@echo off
+setlocal
+set "PATH={path}"
+echo Cameo is installing Codex CLI...
+echo.
+call npm install -g @openai/codex
+set "STATUS=%ERRORLEVEL%"
+echo.
+if "%STATUS%"=="0" (
+  echo Verifying installation...
+  call codex --version
+  echo.
+  echo Next: return to Cameo and click Re-detect.
+) else (
+  echo Install failed with exit code %STATUS%.
+  echo Check the terminal output above, then retry.
+)
+echo.
+pause
+"#
+        )
+    };
+
+    #[cfg(not(windows))]
+    let path = write_unix_terminal_script("cameo-codex-install", &script)?;
+    #[cfg(windows)]
+    let path = write_windows_terminal_script("cameo-codex-install", &script)?;
+    open_terminal_script(&path)
+}
+
+/// Open a visible terminal that runs the user's local `codex login`.
+pub fn open_login_terminal() -> Result<(), String> {
+    let codex = resolve_codex()?;
+
+    #[cfg(not(windows))]
+    let script = {
+        let search_path = sh_quote(&codex.search_path);
+        let codex_path = sh_quote(&codex.path.to_string_lossy());
+        format!(
+            r#"#!/bin/zsh
+set +e
+export PATH={search_path}
+echo "Cameo is opening Codex login..."
+echo
+{codex_path} login
+echo
+echo "After login finishes, return to Cameo and click Re-detect."
+echo
+echo "Press any key to close this window."
+read -rsn 1
+"#
+        )
+    };
+
+    #[cfg(windows)]
+    let script = {
+        let search_path = batch_escape(&codex.search_path);
+        let codex_path = batch_escape(&codex.path.to_string_lossy());
+        format!(
+            r#"@echo off
+setlocal
+set "PATH={search_path}"
+echo Cameo is opening Codex login...
+echo.
+call "{codex_path}" login
+echo.
+echo After login finishes, return to Cameo and click Re-detect.
+echo.
+pause
+"#
+        )
+    };
+
+    #[cfg(not(windows))]
+    let path = write_unix_terminal_script("cameo-codex-login", &script)?;
+    #[cfg(windows)]
+    let path = write_windows_terminal_script("cameo-codex-login", &script)?;
+    open_terminal_script(&path)
 }
 
 // ── Per-Board session state ──────────────────────────────────────────────────
@@ -656,6 +1046,26 @@ pub async fn start_session(
         return Err(e);
     }
     inner.notify("initialized", json!({})).await;
+
+    match get_auth_status(&inner).await {
+        Ok(auth) => {
+            if auth.requires_login {
+                discard_session(&codex_reg, &board_id, &session).await;
+                return Err("Codex is installed but not logged in. Run `codex login`.".into());
+            }
+            if auth.auth_method.is_some() && !auth.auth_supported {
+                discard_session(&codex_reg, &board_id, &session).await;
+                return Err("Cameo requires Codex signed in with ChatGPT. Run `codex login`.".into());
+            }
+        }
+        Err(e) => {
+            tracing::warn!(
+                module = "codex",
+                error = %e,
+                "could not preflight codex auth; continuing with thread start"
+            );
+        }
+    }
 
     // Resume (or migrate from legacy meta.threadId) the ACTIVE session's thread.
     let legacy = storage::load_meta(&folder).thread_id.clone();
@@ -1087,21 +1497,26 @@ pub async fn respond_permission(
     Ok(())
 }
 
+async fn get_auth_status(inner: &Arc<CodexSessionInner>) -> Result<CodexAuthStatus, String> {
+    let res = inner
+        .call(
+            "getAuthStatus",
+            json!({ "includeToken": false, "refreshToken": false }),
+            10_000,
+        )
+        .await?;
+    Ok(parse_auth_status(&res))
+}
+
 /// Probe ChatGPT-subscription auth. Returns (authMethod, requiresLogin).
 pub async fn auth_status(codex_reg: Arc<CodexRegistry>, board_id: String) -> Result<Value, String> {
     let session = codex_reg.get(&board_id).ok_or("no session")?;
-    let res = session
-        .inner
-        .call("getAuthStatus", json!({}), 10_000)
-        .await?;
-    let auth_method = res.get("authMethod").and_then(|v| v.as_str());
-    let requires_openai = res
-        .get("requiresOpenaiAuth")
-        .and_then(|v| v.as_bool())
-        .unwrap_or(false);
+    let auth = get_auth_status(&session.inner).await?;
     Ok(json!({
-        "authMethod": auth_method,
-        "requiresLogin": auth_method.is_none() && requires_openai,
+        "authMethod": auth.auth_method,
+        "requiresOpenaiAuth": auth.requires_openai_auth,
+        "requiresLogin": auth.requires_login,
+        "authSupported": auth.auth_supported,
     }))
 }
 
@@ -1914,6 +2329,63 @@ mod tests {
     fn codex_error_notice_does_not_fabricate_unknown_error() {
         assert_eq!(codex_notice_message(&json!({})), None);
         assert_eq!(codex_notice_message(&Value::Null), None);
+    }
+
+    #[test]
+    fn auth_status_marks_missing_chatgpt_auth_as_login_required() {
+        let auth = parse_auth_status(&json!({
+            "authMethod": null,
+            "authToken": null,
+            "requiresOpenaiAuth": true,
+        }));
+
+        assert_eq!(auth.auth_method, None);
+        assert!(auth.requires_openai_auth);
+        assert!(auth.requires_login);
+        assert!(!auth.auth_supported);
+    }
+
+    #[test]
+    fn auth_status_accepts_chatgpt_login() {
+        let auth = parse_auth_status(&json!({
+            "authMethod": "chatgpt",
+            "authToken": null,
+            "requiresOpenaiAuth": true,
+        }));
+
+        assert_eq!(auth.auth_method.as_deref(), Some("chatgpt"));
+        assert!(auth.requires_openai_auth);
+        assert!(!auth.requires_login);
+        assert!(auth.auth_supported);
+    }
+
+    #[test]
+    fn auth_status_rejects_api_key_for_cameo() {
+        let auth = parse_auth_status(&json!({
+            "authMethod": "apikey",
+            "authToken": null,
+            "requiresOpenaiAuth": true,
+        }));
+
+        assert_eq!(auth.auth_method.as_deref(), Some("apikey"));
+        assert!(!auth.requires_login);
+        assert!(!auth.auth_supported);
+    }
+
+    #[test]
+    fn rpc_response_filter_ignores_same_id_server_requests() {
+        assert!(is_rpc_response_for(
+            &json!({ "jsonrpc": "2.0", "id": 7, "result": {} }),
+            7,
+        ));
+        assert!(!is_rpc_response_for(
+            &json!({ "jsonrpc": "2.0", "id": 7, "method": "tool/request", "params": {} }),
+            7,
+        ));
+        assert!(!is_rpc_response_for(
+            &json!({ "jsonrpc": "2.0", "id": 8, "result": {} }),
+            7,
+        ));
     }
 
     #[test]

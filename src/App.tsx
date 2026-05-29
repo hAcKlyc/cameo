@@ -42,6 +42,15 @@ function wait(ms: number) {
   return new Promise((resolve) => window.setTimeout(resolve, ms));
 }
 
+function isCodexSetupError(e: unknown) {
+  const msg = String(e).toLowerCase();
+  return (
+    msg.includes("codex is installed but not logged in") ||
+    msg.includes("cameo requires codex signed in") ||
+    msg.includes("codex not found in augmented path")
+  );
+}
+
 async function pickImages() {
   const sel = await open({
     multiple: true,
@@ -326,6 +335,7 @@ export default function App() {
             break;
           } catch (e) {
             lastStartError = e;
+            if (isCodexSetupError(e)) break;
           }
         }
         if (lastStartError) throw lastStartError;

@@ -137,6 +137,13 @@ export interface CodexInfo {
   version?: string | null;
 }
 
+export interface CodexAuthStatus {
+  authMethod?: string | null;
+  requiresOpenaiAuth: boolean;
+  requiresLogin: boolean;
+  authSupported: boolean;
+}
+
 // Mirrors src-tauri/src/runtime.rs UnifiedEvent (tag "kind", camelCase fields).
 export type CodexEvent =
   | { kind: "sessionInit"; threadId: string; model: string }

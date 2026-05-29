@@ -241,7 +241,9 @@ TS 侧镜像于 `src/types.ts::CodexEvent`（serde camelCase wire form）。
 ### 5.4 鉴权 + 网络
 
 - Codex 用 `~/.codex` 的 ChatGPT 订阅，**Cameo 完全不接 OpenAI**。
-- 用户切换/登出 Codex → Cameo 不感知，Codex sidecar 自己处理。
+- Agent 状态面板会做本机 setup/auth 探测：先找 Codex CLI，再用 `codex app-server`
+  的 `getAuthStatus` 检查是否需要 `codex login`。探测只返回 auth method / 是否需要登录，
+  **不请求 token、不读取 token**；真正运行中的账号切换 / token 刷新仍由 Codex sidecar 自己处理。
 - 代理仅注入 Codex sidecar 的 env；保存设置后**自动重启当前 session**（`settings.restartNonce`
   → `App.tsx` 的会话 effect 依赖它）让新代理生效。
 - 代理开关开启且 host / port 有效时，Settings 会触发 `proxy.rs::probe_connectivity`：先连本地

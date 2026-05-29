@@ -1286,6 +1286,24 @@ pub fn detect_codex() -> codex::CodexInfo {
     codex::detect()
 }
 
+/// Probe local Codex CLI auth without requiring an open Board session.
+#[tauri::command]
+pub async fn probe_codex_auth() -> Result<codex::CodexAuthStatus, String> {
+    codex::probe_auth().await
+}
+
+/// Open a visible terminal window that installs Codex CLI.
+#[tauri::command]
+pub fn open_codex_install_terminal() -> Result<(), String> {
+    codex::open_install_terminal()
+}
+
+/// Open a visible terminal window that runs `codex login`.
+#[tauri::command]
+pub fn open_codex_login_terminal() -> Result<(), String> {
+    codex::open_login_terminal()
+}
+
 /// Open a directory in the OS file manager (workspace "open folder" action).
 #[tauri::command]
 pub fn open_dir(path: String) -> Result<(), String> {

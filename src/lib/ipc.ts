@@ -1,6 +1,7 @@
 import { invoke } from "@tauri-apps/api/core";
 import type {
   AppConfig,
+  CodexAuthStatus,
   CodexInfo,
   Asset,
   BoardInfo,
@@ -117,6 +118,12 @@ export const ipc = {
   readClipboardImage: () => invoke<number[] | null>("read_clipboard_image"),
   /** Detect the local Codex CLI (path + version). */
   detectCodex: () => invoke<CodexInfo>("detect_codex"),
+  /** Probe local Codex CLI auth without requiring an open Board session. */
+  probeCodexAuth: () => invoke<CodexAuthStatus>("probe_codex_auth"),
+  /** Open a visible terminal that installs the Codex CLI. */
+  openCodexInstallTerminal: () => invoke<void>("open_codex_install_terminal"),
+  /** Open a visible terminal that runs `codex login`. */
+  openCodexLoginTerminal: () => invoke<void>("open_codex_login_terminal"),
   /** Open a directory in the OS file manager. */
   openDir: (path: string) => invoke<void>("open_dir", { path }),
 

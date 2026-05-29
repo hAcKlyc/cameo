@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState, type PointerEvent as ReactPointerEvent } from "react";
-import { Plus, History, ChevronDown, ChevronUp, X, TriangleAlert, Image as ImageIcon, RefreshCw, Copy, ExternalLink } from "lucide-react";
+import { Plus, History, ChevronDown, ChevronUp, X, TriangleAlert, Image as ImageIcon, RefreshCw, Copy, ExternalLink, Terminal } from "lucide-react";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { useChatStore, type ChatBlock, type ChatMessage, type RateLimit, type SessionStatus } from "../store/chat";
 import { useBoardStore } from "../store/board";
@@ -7,7 +7,7 @@ import { useSettingsStore } from "../store/settings";
 import { CHAT_PANEL_MAX_WIDTH, CHAT_PANEL_MIN_WIDTH, useUiStore } from "../store/ui";
 import { ipc } from "../lib/ipc";
 import { useAssetObjectUrl } from "../lib/asset-url";
-import type { Shape, CodexInfo } from "../types";
+import type { Shape, CodexAuthStatus, CodexInfo } from "../types";
 import { Composer } from "./Composer";
 import { StreamingStatus } from "./StreamingStatus";
 import { AssistantMarkdown } from "./AssistantMarkdown";
@@ -266,8 +266,14 @@ function GeneratedImageBlock({ placementId }: { placementId: string }) {
 }
 
 const CODEX_INSTALL_CMD = "npm install -g @openai/codex";
-const CODEX_START_CMD = "codex";
+const CODEX_LOGIN_CMD = "codex login";
 const CODEX_DOCS = "https://developers.openai.com/codex/cli";
+
+type AuthProbeState =
+  | { status: "idle" }
+  | { status: "checking" }
+  | { status: "ready"; data: CodexAuthStatus }
+  | { status: "error"; error: string };
 
 function CmdRow({ cmd }: { cmd: string }) {
   return (
@@ -277,6 +283,15 @@ function CmdRow({ cmd }: { cmd: string }) {
         <Copy size={13} />
       </button>
     </div>
+  );
+}
+
+function TerminalButton({ label, onClick, disabled }: { label: string; onClick: () => void; disabled?: boolean }) {
+  return (
+    <button className="cm-agent-pop__primary" onClick={onClick} disabled={disabled}>
+      <Terminal size={13} />
+      {label}
+    </button>
   );
 }
 
@@ -332,20 +347,61 @@ function QuotaRow({
 function AgentStatus({ status, rateLimit }: { status: SessionStatus; rateLimit: RateLimit | null }) {
   const [open, setOpen] = useState(false);
   const [info, setInfo] = useState<CodexInfo | null>(null);
+  const [auth, setAuth] = useState<AuthProbeState>({ status: "idle" });
   const [loading, setLoading] = useState(false);
+  const [actionError, setActionError] = useState<string | null>(null);
+  const [terminalPending, setTerminalPending] = useState<"install" | "login" | null>(null);
   const ref = useRef<HTMLDivElement>(null);
+  const detectSeqRef = useRef(0);
   const boardId = useBoardStore((s) => s.boardId);
   const t = useT();
   const lang = useLocaleStore((s) => s.lang);
-  const statusLabel = t(`agent.status.${status}` as MsgKey);
+  const authData = auth.status === "ready" ? auth.data : null;
+  const requiresLogin = !!info?.found && !!authData?.requiresLogin;
+  const unsupportedAuth = !!info?.found && !!authData?.authMethod && !authData.requiresLogin && !authData.authSupported;
+  const ambiguousAuth = !!info?.found && !!authData && !authData.requiresLogin && !authData.authMethod;
+  const authProbeFailed = !!info?.found && auth.status === "error";
+  const authUnknown = ambiguousAuth || authProbeFailed;
+  const displayStatus: SessionStatus = requiresLogin || unsupportedAuth || authUnknown ? "error" : status;
+  const statusLabel = requiresLogin
+    ? t("agent.auth.notLoggedIn")
+    : unsupportedAuth
+      ? t("agent.auth.unsupportedShort")
+      : authUnknown
+        ? t("agent.auth.unknownShort")
+        : t(`agent.status.${status}` as MsgKey);
 
   const detect = useCallback(() => {
+    const seq = detectSeqRef.current + 1;
+    detectSeqRef.current = seq;
     setLoading(true);
-    ipc
-      .detectCodex()
-      .then(setInfo)
-      .catch(() => setInfo({ found: false }))
-      .finally(() => setLoading(false));
+    setActionError(null);
+    setAuth({ status: "checking" });
+    void (async () => {
+      try {
+        const nextInfo = await ipc.detectCodex();
+        if (detectSeqRef.current !== seq) return;
+        setInfo(nextInfo);
+        if (!nextInfo.found) {
+          setAuth({ status: "idle" });
+          return;
+        }
+        try {
+          const data = await ipc.probeCodexAuth();
+          if (detectSeqRef.current !== seq) return;
+          setAuth({ status: "ready", data });
+        } catch (e) {
+          if (detectSeqRef.current !== seq) return;
+          setAuth({ status: "error", error: e instanceof Error ? e.message : String(e) });
+        }
+      } catch {
+        if (detectSeqRef.current !== seq) return;
+        setInfo({ found: false });
+        setAuth({ status: "idle" });
+      } finally {
+        if (detectSeqRef.current === seq) setLoading(false);
+      }
+    })();
   }, []);
 
   const reconnect = useCallback(() => {
@@ -357,6 +413,24 @@ function AgentStatus({ status, rateLimit }: { status: SessionStatus; rateLimit: 
     })();
     setOpen(false);
   }, [boardId]);
+
+  const openInstallTerminal = useCallback(() => {
+    setActionError(null);
+    setTerminalPending("install");
+    void ipc
+      .openCodexInstallTerminal()
+      .catch((e) => setActionError(e instanceof Error ? e.message : String(e)))
+      .finally(() => setTerminalPending(null));
+  }, []);
+
+  const openLoginTerminal = useCallback(() => {
+    setActionError(null);
+    setTerminalPending("login");
+    void ipc
+      .openCodexLoginTerminal()
+      .catch((e) => setActionError(e instanceof Error ? e.message : String(e)))
+      .finally(() => setTerminalPending(null));
+  }, []);
 
   useEffect(() => {
     if (open && !info) detect();
@@ -383,13 +457,97 @@ function AgentStatus({ status, rateLimit }: { status: SessionStatus; rateLimit: 
       <button className="cm-agent" title={`Codex · ${statusLabel}`} onClick={() => setOpen((o) => !o)}>
         <img className="cm-agent__icon" src={codexIcon} alt="" />
         <span className="cm-agent__name">Codex</span>
-        <span className="cm-agent__dot" data-status={status} aria-hidden />
+        <span className="cm-agent__dot" data-status={displayStatus} aria-hidden />
         <ChevronDown size={13} className="cm-agent__caret" />
       </button>
       {open && (
         <div className="cm-agent-pop">
           {loading && !info ? (
             <div className="cm-agent-pop__hint">{t("agent.detecting")}</div>
+          ) : info?.found && auth.status === "checking" ? (
+            <>
+              <div className="cm-agent-pop__row">
+                <span className="cm-agent-pop__k">{t("agent.version")}</span>
+                <span className="cm-agent-pop__v">{info.version ?? "—"}</span>
+              </div>
+              <div className="cm-agent-pop__row">
+                <span className="cm-agent-pop__k">{t("agent.path")}</span>
+                <span className="cm-agent-pop__v cm-agent-pop__path" title={info.path ?? ""}>
+                  {info.path ?? "—"}
+                </span>
+              </div>
+              <div className="cm-agent-pop__hint">{t("agent.auth.checking")}</div>
+            </>
+          ) : info?.found && requiresLogin ? (
+            <>
+              <div className="cm-agent-pop__title">
+                <span className="cm-agent__dot" data-status="error" aria-hidden />
+                {t("agent.auth.notLoggedIn")}
+              </div>
+              <p className="cm-agent-pop__desc">{t("agent.loginDesc")}</p>
+              <div className="cm-agent-pop__row">
+                <span className="cm-agent-pop__k">{t("agent.version")}</span>
+                <span className="cm-agent-pop__v">{info.version ?? "—"}</span>
+              </div>
+              <div className="cm-agent-pop__row">
+                <span className="cm-agent-pop__k">{t("agent.path")}</span>
+                <span className="cm-agent-pop__v cm-agent-pop__path" title={info.path ?? ""}>
+                  {info.path ?? "—"}
+                </span>
+              </div>
+              <div className="cm-agent-pop__step">
+                <span className="cm-agent-pop__steplabel">{t("agent.loginCommand")}</span>
+                <CmdRow cmd={CODEX_LOGIN_CMD} />
+              </div>
+              <TerminalButton label={t("agent.openTerminalLogin")} onClick={openLoginTerminal} disabled={terminalPending === "login"} />
+              {actionError && <p className="cm-agent-pop__error">{t("agent.terminalError", { error: actionError })}</p>}
+              <button className="cm-agent-pop__link" onClick={detect}>
+                <RefreshCw size={12} />
+                {t("agent.redetect")}
+              </button>
+            </>
+          ) : info?.found && unsupportedAuth ? (
+            <>
+              <div className="cm-agent-pop__title">
+                <span className="cm-agent__dot" data-status="error" aria-hidden />
+                {t("agent.auth.unsupported")}
+              </div>
+              <p className="cm-agent-pop__desc">{t("agent.authUnsupportedDesc")}</p>
+              <div className="cm-agent-pop__row">
+                <span className="cm-agent-pop__k">{t("agent.auth.label")}</span>
+                <span className="cm-agent-pop__v">{authData?.authMethod ?? "—"}</span>
+              </div>
+              <div className="cm-agent-pop__step">
+                <span className="cm-agent-pop__steplabel">{t("agent.loginCommand")}</span>
+                <CmdRow cmd={CODEX_LOGIN_CMD} />
+              </div>
+              <TerminalButton label={t("agent.openTerminalLogin")} onClick={openLoginTerminal} disabled={terminalPending === "login"} />
+              {actionError && <p className="cm-agent-pop__error">{t("agent.terminalError", { error: actionError })}</p>}
+              <button className="cm-agent-pop__link" onClick={detect}>
+                <RefreshCw size={12} />
+                {t("agent.redetect")}
+              </button>
+            </>
+          ) : info?.found && authUnknown ? (
+            <>
+              <div className="cm-agent-pop__title">
+                <span className="cm-agent__dot" data-status="error" aria-hidden />
+                {t("agent.auth.unknown")}
+              </div>
+              <p className="cm-agent-pop__desc">{t("agent.authUnknownDesc")}</p>
+              <div className="cm-agent-pop__step">
+                <span className="cm-agent-pop__steplabel">{t("agent.loginCommand")}</span>
+                <CmdRow cmd={CODEX_LOGIN_CMD} />
+              </div>
+              <TerminalButton label={t("agent.openTerminalLogin")} onClick={openLoginTerminal} disabled={terminalPending === "login"} />
+              {actionError && <p className="cm-agent-pop__error">{t("agent.terminalError", { error: actionError })}</p>}
+              <div className="cm-agent-pop__actions">
+                <button className="cm-agent-pop__link" onClick={detect}>
+                  <RefreshCw size={12} />
+                  {t("agent.redetect")}
+                </button>
+              </div>
+            </>
           ) : info?.found ? (
             <>
               <div className="cm-agent-pop__row">
@@ -397,6 +555,13 @@ function AgentStatus({ status, rateLimit }: { status: SessionStatus; rateLimit: 
                 <span className="cm-agent-pop__status">
                   <span className="cm-agent__dot" data-status={status} aria-hidden />
                   {statusLabel}
+                </span>
+              </div>
+              <div className="cm-agent-pop__row">
+                <span className="cm-agent-pop__k">{t("agent.auth.label")}</span>
+                <span className="cm-agent-pop__status">
+                  <span className="cm-agent__dot" data-status="ready" aria-hidden />
+                  {t("agent.auth.signedIn")}
                 </span>
               </div>
               <div className="cm-agent-pop__row">
@@ -451,11 +616,9 @@ function AgentStatus({ status, rateLimit }: { status: SessionStatus; rateLimit: 
                 <span className="cm-agent-pop__steplabel">{t("agent.step1")}</span>
                 <CmdRow cmd={CODEX_INSTALL_CMD} />
               </div>
-              <div className="cm-agent-pop__step">
-                <span className="cm-agent-pop__steplabel">{t("agent.step2")}</span>
-                <CmdRow cmd={CODEX_START_CMD} />
-                <p className="cm-agent-pop__hint2">{t("agent.step2note")}</p>
-              </div>
+              <TerminalButton label={t("agent.openTerminalInstall")} onClick={openInstallTerminal} disabled={terminalPending === "install"} />
+              <p className="cm-agent-pop__hint2">{t("agent.installAfterNote")}</p>
+              {actionError && <p className="cm-agent-pop__error">{t("agent.terminalError", { error: actionError })}</p>}
               <div className="cm-agent-pop__actions">
                 <button className="cm-agent-pop__link" onClick={() => void openUrl(CODEX_DOCS)}>
                   <ExternalLink size={12} />
