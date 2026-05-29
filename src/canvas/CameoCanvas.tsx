@@ -174,6 +174,16 @@ export function CameoCanvas() {
         sceneRef.current?.fitSelection();
         return;
       }
+      if ((e.metaKey || e.ctrlKey) && (e.code === "Equal" || e.code === "NumpadAdd" || e.key === "+" || e.key === "=")) {
+        e.preventDefault();
+        sceneRef.current?.zoomStep("in");
+        return;
+      }
+      if ((e.metaKey || e.ctrlKey) && (e.code === "Minus" || e.code === "NumpadSubtract" || e.key === "-")) {
+        e.preventDefault();
+        sceneRef.current?.zoomStep("out");
+        return;
+      }
       if ((e.metaKey || e.ctrlKey) && e.code === "Digit0") {
         e.preventDefault();
         sceneRef.current?.resetZoom();

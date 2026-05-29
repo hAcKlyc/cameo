@@ -1,7 +1,7 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
   "productName": "Cameo",
-  "version": "0.1.4",
+  "version": "0.1.5",
   "identifier": "com.cameo.desktop",
   "build": {
     "beforeDevCommand": "pnpm dev",
@@ -22,7 +22,7 @@
         "hiddenTitle": true,
         "decorations": true,
         "transparent": false,
-        "zoomHotkeysEnabled": false,
+        "zoomHotkeysEnabled": true,
         "backgroundColor": "#FAFAFA",
         "trafficLightPosition": { "x": 16, "y": 18 }
       }

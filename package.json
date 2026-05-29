@@ -1,7 +1,7 @@
 {
   "name": "cameo",
   "private": true,
-  "version": "0.1.4",
+  "version": "0.1.5",
   "description": "An image-first canvas for your local Codex agent.",
   "license": "AGPL-3.0-or-later",
   "author": "Ethan L <myagents.io@gmail.com>",
