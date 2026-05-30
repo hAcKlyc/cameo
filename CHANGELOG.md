@@ -3,6 +3,29 @@
 User-facing release notes for Cameo. This file describes what changed from a
 user's point of view, rather than listing internal implementation details.
 
+## [0.1.7] - 2026-05-31
+
+### Improvements
+
+- **Codex skills, right from the input box**: type `/` to see the skills enabled
+  in your current folder and run one inline. Cameo sends it to Codex as a proper
+  skill while keeping the slash label visible in your chat history.
+- Cameo now works with **any Codex CLI sign-in** — a ChatGPT subscription, an API
+  key, or another Codex-supported provider — not just a subscription login. As
+  before, Cameo never receives or stores your API key.
+- You can now **check for updates on demand** from Settings, which also shows the
+  version you're running and a link to the full release notes. Updates still
+  download automatically in the background; this just lets you trigger and watch
+  a check yourself.
+- Smaller canvas and composer polish: reference and skill pills are easier to
+  edit, and hovering an image on the canvas gives clearer feedback.
+
+### Fixes
+
+- App updates apply more reliably on Windows.
+
+---
+
 ## [0.1.6] - 2026-05-30
 
 ### Improvements
