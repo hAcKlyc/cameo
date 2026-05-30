@@ -8,8 +8,9 @@ user's point of view, rather than listing internal implementation details.
 ### Improvements
 
 - A new **Codex setup panel** makes getting started clearer: Cameo tells you
-  whether the Codex CLI is installed and signed in, and gives one-tap guidance
-  (install / `codex login`) with a re-check button when something's missing.
+  whether the Codex CLI is installed and authenticated/configured, and gives
+  one-tap guidance (install / Codex auth setup) with a re-check button when
+  something's missing.
 - You can now choose how Codex generates right from the input box — pick the
   **model**, the **intelligence** (reasoning effort: low / medium / high / extra
   high), and the **speed** (standard or fast), mirroring the official Codex app.
@@ -111,8 +112,8 @@ thread.
 
 - Native app for macOS and Windows, built with a GPU-backed canvas for large
   image boards.
-- Uses your own logged-in Codex CLI and ChatGPT subscription. Cameo does not
-  bundle Codex, sell tokens, or require an API key.
+- Uses your own Codex CLI credentials or provider setup. Cameo does not bundle
+  Codex, sell tokens, or store API keys.
 - Includes workspace restore, multiple sessions per board, timeline persistence,
   streaming Codex responses, clarifying questions, settings, proxy support,
   unified logs, tray behavior, and app update support.

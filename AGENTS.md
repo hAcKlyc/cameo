@@ -21,8 +21,8 @@
   overlay + 血缘 + 限流面板 + Gallery + 自动更新 + 托盘都在线。输入框带生成档位选择器（模型 /
   智能 effort / 速度 service tier，每轮 `turn/start` 显式下发）；消息时间线由 Rust runtime 权威
   落盘；产品所有对外网络（cloud / gallery / 埋点）与 Codex 一致统一走 Settings 代理。Codex CLI
-  用用户自己已登录的那份，Cameo 不打包、不卖 token。
-- **运行**：`pnpm install && pnpm tauri dev`（需要 `codex login` 过的 Codex CLI）。完整下载 /
+  用用户自己已认证或已配置 provider/API 的那份，Cameo 不打包、不卖 token。
+- **运行**：`pnpm install && pnpm tauri dev`（需要已完成认证或 provider/API 配置的 Codex CLI）。完整下载 /
   打包步骤见 [`README.md`](./README.md)。
 
 ---
@@ -90,7 +90,7 @@
 | 决策 | 锁定值 |
 |---|---|
 | 定位 | image-first 的 Codex 前端 |
-| 目标用户 | **已付费 Codex 的存量用户**；用其订阅，不卖 token、不收积分 |
+| 目标用户 | **已有可用本机 Codex CLI 的用户**（ChatGPT 订阅或 Codex 支持的 provider/API 配置）；不卖 token、不收积分 |
 | Agent 状态 | **stateful session（Codex app-server 持久进程）**，不是无状态函数 |
 | 真相归属 | 三真相源（Folder / Board doc / Session）|
 | 标记机制 | **overlay-as-image**（发图，不依赖结构化 mask API）|
@@ -101,7 +101,7 @@
 | 对话粒度 | per-Board 一条连续 session（非 per-image chat）|
 | 存储 | 注册表 / 全局名 → `~/.cameo/`，画布状态 + 血缘 → folder sidecar `.cameo/` |
 | 引用 | v1 走文件路径，agent 自读，不挂传图 |
-| 鉴权 | `~/.codex` ChatGPT 订阅，**无 API key** |
+| 鉴权 | 复用 Codex CLI 自己的凭据 / provider 配置；Cameo **不接收、不保存 API key** |
 | 云 | 编译期开关（`VITE_CAMEO_API_*`），开源 fork 默认无云 |
 | 生成档位 | model/effort/serviceTier 每轮 `turn/start` 显式下发 + per-Board 持久化（不回落用户 config.toml）；summary=auto / personality=friendly 固定默认 |
 | 时间线落盘 | **Rust runtime 权威写入** `.cameo/sessions/<id>.jsonl`（绑定 turn 的 session、不依赖前端聚焦），前端不再 best-effort append |

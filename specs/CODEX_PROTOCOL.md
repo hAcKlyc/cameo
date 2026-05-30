@@ -20,7 +20,8 @@
 
 - 驱动方式：`codex app-server` —— **长生命周期 JSON-RPC 2.0 over stdio** 进程，整个 session 存活
   （不是 `codex exec` / `codex proto` / `codex mcp`，也不是每轮重启）。一个 Board 一个进程。
-- 鉴权：用户的 **ChatGPT 订阅**（`~/.codex`，`codex login` 一次），**无 API key**。
+- 鉴权：复用用户本机 **Codex CLI 自己的凭据 / provider 配置**（ChatGPT 登录、API key
+  登录或自定义 provider）。Cameo 不接收、不保存 API key。
 - 会话连续性 = Codex 自己的 **`threadId`**（Cameo 持久化到 `.cameo/sessions.json`）。
 - 原生支持图像输入（文本里给路径 / `localImage`）和图像输出（`imageGeneration` item）。
 
@@ -235,13 +236,15 @@ collaborationMode / cwd / modelProvider / approvalsReviewer / activePermissionPr
 
 ---
 
-## 9. Auth — ChatGPT 订阅，无 API key
+## 9. Auth — 复用 Codex CLI 凭据 / provider
 
-- 不传 API key；Codex 读 `~/.codex`（`codex login` 一次，OAuth into ChatGPT，token 在
-  `~/.codex/auth.json` / keychain）。
+- Cameo 不传、不保存 API key；Codex 自己读 `~/.codex` 和用户配置（ChatGPT OAuth token、
+  `codex login --with-api-key` 写入的 key、或自定义 provider 配置）。
 - 探测：`getAuthStatus { includeToken:false, refreshToken:false }` → `{ authMethod,
   requiresOpenaiAuth }`。判定 `requiresLogin = !authMethod && requiresOpenaiAuth === true`。
-- `authMethod` ∈ `apikey` / `chatgpt` / `chatgptAuthTokens`（健康订阅用户 = `chatgpt`）。
+- `authMethod` 可为 `apikey` / `chatgpt` / `chatgptAuthTokens` 等；只要 Codex 已有 auth method，
+  或 `requiresOpenaiAuth=false`（例如 provider 不需要 OpenAI 登录），Cameo 应放行，让 Codex
+  自己在 `thread/start` / `turn/start` 阶段处理配置有效性。
 - Cameo 不存、不展示 token。详见 `prd_codex_setup_status_panel.md` + `probe_codex_auth`。
 
 ---

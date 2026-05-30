@@ -29,7 +29,7 @@ Chat is a terrible interface for images. You can't point at the corner of a phot
 
 Cameo puts that capability into a **spatial canvas** instead. You open a folder, its images lay out on an infinite board, and you work the way you actually think about images: select one, draw a box on the part you mean, type an instruction, and the result lands **right next to the source** so the lineage is visible. The conversation stays continuous — "warmer," "now change the background," "do that to these three" — because there's one ongoing Codex session per board.
 
-Cameo is **the hands and eyes, not the brain.** It does not host a model, sell tokens, or orchestrate agents. All generation and understanding stay with Codex (using your existing ChatGPT subscription — no API key). Cameo owns only what a chat UI structurally can't: spatial layout, file identity, non-destructive lineage, and "what you're pointing at."
+Cameo is **the hands and eyes, not the brain.** It does not host a model, sell tokens, or orchestrate agents. All generation and understanding stay with your local Codex CLI, using whatever Codex credentials or provider configuration you already have. Cameo owns only what a chat UI structurally can't: spatial layout, file identity, non-destructive lineage, and "what you're pointing at."
 
 <p align="center">
   <img src="docs/app-en.png" width="840" alt="The Cameo desktop app — infinite canvas on the left, a continuous Codex session on the right" />
@@ -76,7 +76,7 @@ A browsable gallery of prompts and results lives at **[cameo.ink/gallery](https:
 
 Prerequisites (all platforms):
 
-- **Codex CLI** installed and signed in: `codex login` (uses your ChatGPT subscription — no API key). Verify with `codex --version`. Cameo drives your own Codex — it is **not** bundled.
+- **Codex CLI** installed and authenticated/configured: `codex login`, `codex login --with-api-key`, or another Codex-supported provider setup. Verify with `codex --version`. Cameo drives your own Codex — it is **not** bundled and does not store API keys.
 - Node 20+ and **pnpm**, plus the **Rust** toolchain (rustup) for Tauri 2.
 - **macOS**: Xcode Command Line Tools (`xcode-select --install`).
 - **Windows**: Visual Studio Build Tools with the *Desktop development with C++* workload, and the WebView2 runtime (preinstalled on Windows 11).
@@ -141,7 +141,7 @@ Cameo is an independent, unofficial tool. It drives the Codex CLI but is **not**
 
 Cameo 把这份能力搬进了**空间画布**。你打开一个文件夹，里面的图在无限画布上铺开，然后用你真正思考图片的方式去工作：选中一张、在你想改的部位画个框、敲一句指令，结果就落在**源图右边**，血缘一目了然。对话是连续的——「再暖一点」「现在换个背景」「把这三张都这么处理」——因为每个 board 对应一条持续的 Codex 会话。
 
-Cameo 是**手和眼，不是脑子**。它不托管模型、不卖 token、不在 agent 层做编排。所有生成与理解都交给 Codex（用你已有的 ChatGPT 订阅，无需 API key）。Cameo 只负责聊天 UI 结构上做不到的事：空间布局、文件身份、非破坏血缘，以及「你正指着什么」。
+Cameo 是**手和眼，不是脑子**。它不托管模型、不卖 token、不在 agent 层做编排。所有生成与理解都交给你本机的 Codex CLI，复用你已经配置好的 Codex 凭据或 provider。Cameo 只负责聊天 UI 结构上做不到的事：空间布局、文件身份、非破坏血缘，以及「你正指着什么」。
 
 <p align="center">
   <img src="docs/app-zh.png" width="840" alt="Cameo 桌面应用——左边无限画布，右边连续的 Codex 会话" />
@@ -188,7 +188,7 @@ Codex 作为长驻 **`codex app-server`** sidecar 运行（JSON-RPC 2.0 over std
 
 前置（所有平台）：
 
-- **Codex CLI** 已安装并登录：`codex login`（用你的 ChatGPT 订阅，无需 API key）。用 `codex --version` 验证。Cameo 驱动你自己的 Codex——**不打包**它。
+- **Codex CLI** 已安装并完成认证 / 配置：`codex login`、`codex login --with-api-key`，或其它 Codex 支持的 provider 配置。用 `codex --version` 验证。Cameo 驱动你自己的 Codex——**不打包**它，也不保存 API key。
 - Node 20+ 与 **pnpm**，以及 Tauri 2 所需的 **Rust** 工具链（rustup）。
 - **macOS**：Xcode 命令行工具（`xcode-select --install`）。
 - **Windows**：带 *Desktop development with C++* 工作负载的 Visual Studio Build Tools，以及 WebView2 运行时（Windows 11 已预装）。

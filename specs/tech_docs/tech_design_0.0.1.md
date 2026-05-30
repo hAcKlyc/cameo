@@ -241,9 +241,10 @@ Cameo 想要的"**stateful session，一个 Board 一个**"——比 Riff 的 CC
 非阻塞 approval**（编辑只在 Board 文件夹内）。Codex 会以 **server→client request** 形式
 发审批/澄清请求 → Cameo **接住并展示**（PRD §7.7 要 agent 能反问），用 `respond(id,…)` 回。
 
-**鉴权**：用 `~/.codex` 的 ChatGPT 登录，**无 API key**（= 用户的订阅，已确认 OK）。
-`getAuthStatus` 探测：`requiresLogin = !authMethod && requiresOpenaiAuth===true`。
-可选：用 app-server 的 OAuth 登录 RPC 在 app 内引导 `codex login`。
+**鉴权**：复用 Codex CLI 自己的凭据 / provider 配置（ChatGPT 登录、API key 登录或自定义
+provider）。Cameo 不接收、不保存 API key。`getAuthStatus` 探测：
+`requiresLogin = !authMethod && requiresOpenaiAuth===true`；只在这个条件成立时引导用户完成
+Codex 认证 / 配置。
 
 **进程纪律**（沿用 Riff `agent.rs`）：绝对路径预解析（每平台都要）；POSIX `detached`
 便于 tree-kill；取消 = `turn/interrupt` → 关 stdin → SIGTERM 组 3s → SIGKILL 2s；
@@ -295,7 +296,7 @@ fail-safe 剥离 `ALL_PROXY`，默认注入 `NO_PROXY` 保护 localhost。改个
 | ~~SP-1~~ | ✅ Codex `app-server` 支持多图输入（localImage）+ imageGeneration 输出 + 持久 session + 反问，方案见 §8 / `research_codex_runtime.md` |
 | ~~OQ-1~~ | ✅ Tauri 2 + React + PixiJS v8，见 §2 / `research_canvas_stack.md` |
 | ~~OQ-3~~ | ✅ 发 clean + overlay 两张 `localImage` 路径（Codex 收文件路径不收 base64）|
-| ~~SP-2(鉴权)~~ | ✅ 用户 ChatGPT 订阅 / 无 API key（产品方已确认成本 OK）|
+| ~~SP-2(鉴权)~~ | ✅ 复用本机 Codex CLI 凭据 / provider 配置；Cameo 不接收、不保存 API key |
 | ~~OQ-2~~ | ✅ 混合存储（2026-05-24）：画布状态 + 血缘 → folder `.cameo/` sidecar（可移植）；身份/名字/注册表 → 全局 `~/.cameo/workspaces.json`（按 boardId 重绑）；命名 `<origin>-<时间戳>` + `Asset.origin`。见 §3.1 / §4 |
 
 **仍待办：**
@@ -303,7 +304,7 @@ fail-safe 剥离 `ALL_PROXY`，默认注入 `NO_PROXY` 保护 localhost。改个
 | # | 问题 | 影响 |
 |---|---|---|
 | **SP-3** | **画布 spike**：打包 WKWebView 里 200×2048px 纹理 + 平移缩放，量 FPS/VRAM | **承诺主路径前必做** |
-| **SP-4** | 实测观察 Codex 生图的**限流节奏**（订阅下"快速试很多次"会不会被 throttle）| 影响批量/候选数策略 |
+| **SP-4** | 实测观察 Codex 生图的**限流节奏**（快速试很多次会不会被 throttle）| 影响批量/候选数策略 |
 | **OQ-4** | 候选落点（托盘 vs 直接平铺右侧）| 画布交互 |
 | **OQ-5** | 预设清单：v1 方向 = 去背景 / 扩图 / **胶片·相机风滤镜（可多选批量套用真人照，如 Fuji 胶片）** + 本地裁剪/缩放；具体清单待细化 | 需产品方继续给例子 |
 | **OQ-6** | 文件夹↔画布同步语义（外部增删 / 删除 / 命名）| 持久化细节 |

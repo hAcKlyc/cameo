@@ -267,6 +267,7 @@ function GeneratedImageBlock({ placementId }: { placementId: string }) {
 
 const CODEX_INSTALL_CMD = "npm install -g @openai/codex";
 const CODEX_LOGIN_CMD = "codex login";
+const CODEX_API_LOGIN_CMD = "codex login --with-api-key";
 const CODEX_DOCS = "https://developers.openai.com/codex/cli";
 
 type AuthProbeState =
@@ -274,6 +275,16 @@ type AuthProbeState =
   | { status: "checking" }
   | { status: "ready"; data: CodexAuthStatus }
   | { status: "error"; error: string };
+
+type Translate = ReturnType<typeof useT>;
+
+function codexCredentialLabel(auth: CodexAuthStatus | null, t: Translate): string {
+  const method = auth?.authMethod?.toLowerCase() ?? null;
+  if (method === "chatgpt" || method === "chatgptauthtokens") return t("agent.auth.signedIn");
+  if (method === "apikey") return t("agent.auth.apiKey");
+  if (auth?.authMethod) return t("agent.auth.method", { method: auth.authMethod });
+  return t("agent.auth.configured");
+}
 
 function CmdRow({ cmd }: { cmd: string }) {
   return (
@@ -358,18 +369,14 @@ function AgentStatus({ status, rateLimit }: { status: SessionStatus; rateLimit: 
   const lang = useLocaleStore((s) => s.lang);
   const authData = auth.status === "ready" ? auth.data : null;
   const requiresLogin = !!info?.found && !!authData?.requiresLogin;
-  const unsupportedAuth = !!info?.found && !!authData?.authMethod && !authData.requiresLogin && !authData.authSupported;
-  const ambiguousAuth = !!info?.found && !!authData && !authData.requiresLogin && !authData.authMethod;
   const authProbeFailed = !!info?.found && auth.status === "error";
-  const authUnknown = ambiguousAuth || authProbeFailed;
-  const displayStatus: SessionStatus = requiresLogin || unsupportedAuth || authUnknown ? "error" : status;
+  const authUnknown = authProbeFailed;
+  const displayStatus: SessionStatus = requiresLogin || authUnknown ? "error" : status;
   const statusLabel = requiresLogin
     ? t("agent.auth.notLoggedIn")
-    : unsupportedAuth
-      ? t("agent.auth.unsupportedShort")
-      : authUnknown
-        ? t("agent.auth.unknownShort")
-        : t(`agent.status.${status}` as MsgKey);
+    : authUnknown
+      ? t("agent.auth.unknownShort")
+      : t(`agent.status.${status}` as MsgKey);
 
   const detect = useCallback(() => {
     const seq = detectSeqRef.current + 1;
@@ -499,34 +506,22 @@ function AgentStatus({ status, rateLimit }: { status: SessionStatus; rateLimit: 
                 <span className="cm-agent-pop__steplabel">{t("agent.loginCommand")}</span>
                 <CmdRow cmd={CODEX_LOGIN_CMD} />
               </div>
-              <TerminalButton label={t("agent.openTerminalLogin")} onClick={openLoginTerminal} disabled={terminalPending === "login"} />
-              {actionError && <p className="cm-agent-pop__error">{t("agent.terminalError", { error: actionError })}</p>}
-              <button className="cm-agent-pop__link" onClick={detect}>
-                <RefreshCw size={12} />
-                {t("agent.redetect")}
-              </button>
-            </>
-          ) : info?.found && unsupportedAuth ? (
-            <>
-              <div className="cm-agent-pop__title">
-                <span className="cm-agent__dot" data-status="error" aria-hidden />
-                {t("agent.auth.unsupported")}
-              </div>
-              <p className="cm-agent-pop__desc">{t("agent.authUnsupportedDesc")}</p>
-              <div className="cm-agent-pop__row">
-                <span className="cm-agent-pop__k">{t("agent.auth.label")}</span>
-                <span className="cm-agent-pop__v">{authData?.authMethod ?? "—"}</span>
-              </div>
               <div className="cm-agent-pop__step">
-                <span className="cm-agent-pop__steplabel">{t("agent.loginCommand")}</span>
-                <CmdRow cmd={CODEX_LOGIN_CMD} />
+                <span className="cm-agent-pop__steplabel">{t("agent.apiKeyCommand")}</span>
+                <CmdRow cmd={CODEX_API_LOGIN_CMD} />
               </div>
               <TerminalButton label={t("agent.openTerminalLogin")} onClick={openLoginTerminal} disabled={terminalPending === "login"} />
               {actionError && <p className="cm-agent-pop__error">{t("agent.terminalError", { error: actionError })}</p>}
-              <button className="cm-agent-pop__link" onClick={detect}>
-                <RefreshCw size={12} />
-                {t("agent.redetect")}
-              </button>
+              <div className="cm-agent-pop__actions">
+                <button className="cm-agent-pop__link" onClick={() => void openUrl(CODEX_DOCS)}>
+                  <ExternalLink size={12} />
+                  {t("agent.docs")}
+                </button>
+                <button className="cm-agent-pop__link" onClick={detect}>
+                  <RefreshCw size={12} />
+                  {t("agent.redetect")}
+                </button>
+              </div>
             </>
           ) : info?.found && authUnknown ? (
             <>
@@ -539,9 +534,17 @@ function AgentStatus({ status, rateLimit }: { status: SessionStatus; rateLimit: 
                 <span className="cm-agent-pop__steplabel">{t("agent.loginCommand")}</span>
                 <CmdRow cmd={CODEX_LOGIN_CMD} />
               </div>
+              <div className="cm-agent-pop__step">
+                <span className="cm-agent-pop__steplabel">{t("agent.apiKeyCommand")}</span>
+                <CmdRow cmd={CODEX_API_LOGIN_CMD} />
+              </div>
               <TerminalButton label={t("agent.openTerminalLogin")} onClick={openLoginTerminal} disabled={terminalPending === "login"} />
               {actionError && <p className="cm-agent-pop__error">{t("agent.terminalError", { error: actionError })}</p>}
               <div className="cm-agent-pop__actions">
+                <button className="cm-agent-pop__link" onClick={() => void openUrl(CODEX_DOCS)}>
+                  <ExternalLink size={12} />
+                  {t("agent.docs")}
+                </button>
                 <button className="cm-agent-pop__link" onClick={detect}>
                   <RefreshCw size={12} />
                   {t("agent.redetect")}
@@ -561,7 +564,7 @@ function AgentStatus({ status, rateLimit }: { status: SessionStatus; rateLimit: 
                 <span className="cm-agent-pop__k">{t("agent.auth.label")}</span>
                 <span className="cm-agent-pop__status">
                   <span className="cm-agent__dot" data-status="ready" aria-hidden />
-                  {t("agent.auth.signedIn")}
+                  {codexCredentialLabel(authData, t)}
                 </span>
               </div>
               <div className="cm-agent-pop__row">

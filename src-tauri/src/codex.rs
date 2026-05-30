@@ -298,7 +298,6 @@ pub struct CodexAuthStatus {
     pub auth_method: Option<String>,
     pub requires_openai_auth: bool,
     pub requires_login: bool,
-    pub auth_supported: bool,
 }
 
 pub fn detect() -> CodexInfo {
@@ -338,20 +337,12 @@ fn parse_auth_status(res: &Value) -> CodexAuthStatus {
         .get("requiresOpenaiAuth")
         .and_then(|v| v.as_bool())
         .unwrap_or(false);
-    let auth_supported = is_supported_auth_method(auth_method.as_deref());
+    let requires_login = auth_method.is_none() && requires_openai_auth;
     CodexAuthStatus {
-        requires_login: auth_method.is_none() && requires_openai_auth,
-        auth_supported,
+        requires_login,
         auth_method,
         requires_openai_auth,
     }
-}
-
-fn is_supported_auth_method(method: Option<&str>) -> bool {
-    matches!(
-        method,
-        Some("chatgpt" | "chatgptAuthTokens" | "agentIdentity")
-    )
 }
 
 fn is_rpc_response_for(msg: &Value, id: u64) -> bool {
@@ -435,8 +426,8 @@ async fn cleanup_probe_child(child: &mut Child, pid: u32) {
 }
 
 /// Probe local Codex auth without requiring an open Board session. This is used
-/// by the status popover before `thread/start`, so "installed but not logged in"
-/// can be shown as its own product state.
+/// by the status popover before `thread/start`, so missing credentials can be
+/// shown as its own product state.
 pub async fn probe_auth() -> Result<CodexAuthStatus, String> {
     let codex = resolve_codex()?;
     let mut cmd = tokio::process::Command::new(&codex.path);
@@ -668,11 +659,11 @@ pub fn open_login_terminal() -> Result<(), String> {
             r#"#!/bin/zsh
 set +e
 export PATH={search_path}
-echo "Cameo is opening Codex login..."
+echo "Cameo is opening Codex ChatGPT login..."
 echo
 {codex_path} login
 echo
-echo "After login finishes, return to Cameo and click Re-detect."
+echo "After setup finishes, return to Cameo and click Re-detect."
 echo
 echo "Press any key to close this window."
 read -rsn 1
@@ -688,11 +679,11 @@ read -rsn 1
             r#"@echo off
 setlocal
 set "PATH={search_path}"
-echo Cameo is opening Codex login...
+echo Cameo is opening Codex ChatGPT login...
 echo.
 call "{codex_path}" login
 echo.
-echo After login finishes, return to Cameo and click Re-detect.
+echo After setup finishes, return to Cameo and click Re-detect.
 echo.
 pause
 "#
@@ -1066,11 +1057,10 @@ pub async fn start_session(
         Ok(auth) => {
             if auth.requires_login {
                 discard_session(&codex_reg, &board_id, &session).await;
-                return Err("Codex is installed but not logged in. Run `codex login`.".into());
-            }
-            if auth.auth_method.is_some() && !auth.auth_supported {
-                discard_session(&codex_reg, &board_id, &session).await;
-                return Err("Cameo requires Codex signed in with ChatGPT. Run `codex login`.".into());
+                return Err(
+                    "Codex is installed but has no usable credentials. Run `codex login`, `codex login --with-api-key`, or configure a supported provider."
+                        .into(),
+                );
             }
         }
         Err(e) => {
@@ -1749,7 +1739,8 @@ async fn get_auth_status(inner: &Arc<CodexSessionInner>) -> Result<CodexAuthStat
     Ok(parse_auth_status(&res))
 }
 
-/// Probe ChatGPT-subscription auth. Returns (authMethod, requiresLogin).
+/// Probe Codex credentials. Returns auth method plus whether Codex explicitly
+/// needs an OpenAI login.
 pub async fn auth_status(codex_reg: Arc<CodexRegistry>, board_id: String) -> Result<Value, String> {
     let session = codex_reg.get(&board_id).ok_or("no session")?;
     let auth = get_auth_status(&session.inner).await?;
@@ -1757,7 +1748,6 @@ pub async fn auth_status(codex_reg: Arc<CodexRegistry>, board_id: String) -> Res
         "authMethod": auth.auth_method,
         "requiresOpenaiAuth": auth.requires_openai_auth,
         "requiresLogin": auth.requires_login,
-        "authSupported": auth.auth_supported,
     }))
 }
 
@@ -1896,9 +1886,9 @@ async fn reader_loop(inner: Arc<CodexSessionInner>, stdout: ChildStdout) {
 /// surfaced to the UI as a chat note so failures aren't silent (first match
 /// wins). The full line is always written to the unified log regardless.
 const STDERR_SURFACE: &[(&str, &str, &str)] = &[
-    ("401", "warn", "认证失败 (401) — 确认已 codex login"),
+    ("401", "warn", "认证失败 (401) — 确认 Codex 凭据 / provider 配置"),
     ("403", "warn", "无权限 (403)"),
-    ("unauthorized", "warn", "认证失败 — 确认已 codex login"),
+    ("unauthorized", "warn", "认证失败 — 确认 Codex 凭据 / provider 配置"),
     (
         "error sending request",
         "error",
@@ -2608,7 +2598,6 @@ mod tests {
         assert_eq!(auth.auth_method, None);
         assert!(auth.requires_openai_auth);
         assert!(auth.requires_login);
-        assert!(!auth.auth_supported);
     }
 
     #[test]
@@ -2622,11 +2611,10 @@ mod tests {
         assert_eq!(auth.auth_method.as_deref(), Some("chatgpt"));
         assert!(auth.requires_openai_auth);
         assert!(!auth.requires_login);
-        assert!(auth.auth_supported);
     }
 
     #[test]
-    fn auth_status_rejects_api_key_for_cameo() {
+    fn auth_status_accepts_api_key_for_cameo() {
         let auth = parse_auth_status(&json!({
             "authMethod": "apikey",
             "authToken": null,
@@ -2635,7 +2623,19 @@ mod tests {
 
         assert_eq!(auth.auth_method.as_deref(), Some("apikey"));
         assert!(!auth.requires_login);
-        assert!(!auth.auth_supported);
+    }
+
+    #[test]
+    fn auth_status_accepts_provider_that_does_not_require_openai_auth() {
+        let auth = parse_auth_status(&json!({
+            "authMethod": null,
+            "authToken": null,
+            "requiresOpenaiAuth": false,
+        }));
+
+        assert_eq!(auth.auth_method, None);
+        assert!(!auth.requires_openai_auth);
+        assert!(!auth.requires_login);
     }
 
     #[test]

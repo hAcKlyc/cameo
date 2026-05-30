@@ -45,8 +45,8 @@ function wait(ms: number) {
 function isCodexSetupError(e: unknown) {
   const msg = String(e).toLowerCase();
   return (
+    msg.includes("codex is installed but has no usable credentials") ||
     msg.includes("codex is installed but not logged in") ||
-    msg.includes("cameo requires codex signed in") ||
     msg.includes("codex not found in augmented path")
   );
 }
