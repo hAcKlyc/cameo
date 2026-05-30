@@ -4,9 +4,11 @@ import { useSettingsStore } from "../store/settings";
 import { useT, useLocaleStore, type LocaleChoice } from "../i18n/locale";
 import { ipc } from "../lib/ipc";
 import type { MsgKey } from "../i18n/messages";
-import type { ProxyProbeResult, ProxySettings } from "../types";
+import type { ApiImageSettings, ProxyProbeResult, ProxySettings, RuntimeProvider } from "../types";
 
 const PROTOCOLS: ProxySettings["protocol"][] = ["http", "socks5"];
+const PROVIDERS: RuntimeProvider[] = ["codex", "api"];
+const IMAGE_SIZES: ApiImageSettings["size"][] = ["1024x1024", "1024x1536", "1536x1024", "auto"];
 
 const isValidHost = (h: string) => {
   const v = h.trim();
@@ -52,6 +54,7 @@ export function SettingsModal({ onClose }: { onClose: () => void }) {
   const applying = useSettingsStore((s) => s.applying);
   const localeChoice = useLocaleStore((s) => s.choice);
   const proxy = config.proxy;
+  const api = config.api;
   const [proxyProbe, setProxyProbe] = useState<ProxyProbeState>({ status: "idle" });
   const proxyProbeGenerationRef = useRef(0);
   const t = useT();
@@ -69,6 +72,7 @@ export function SettingsModal({ onClose }: { onClose: () => void }) {
   }, [onClose]);
 
   const set = (patch: Partial<ProxySettings>) => useSettingsStore.getState().setProxy(patch);
+  const setApi = (patch: Partial<ApiImageSettings>) => useSettingsStore.getState().setApi(patch);
   const hostOk = isValidHost(proxy.host);
   const portOk = isValidPort(proxy.port);
 
@@ -152,6 +156,86 @@ export function SettingsModal({ onClose }: { onClose: () => void }) {
                 </select>
               </div>
             </div>
+          </section>
+
+          <section className="cm-set-section">
+            <h3 className="cm-set-section__title">{t("settings.runtime")}</h3>
+            <p className="cm-set-section__desc">{t("settings.runtimeDesc")}</p>
+            <div className="cm-set-card">
+              <div className="cm-set-row">
+                <span className="cm-set-row__label">{t("settings.provider")}</span>
+                <select
+                  className="cm-select"
+                  value={config.provider}
+                  onChange={(e) =>
+                    void useSettingsStore.getState().setProvider(e.target.value as RuntimeProvider)
+                  }
+                >
+                  {PROVIDERS.map((p) => (
+                    <option key={p} value={p}>
+                      {t(p === "codex" ? "settings.provider.codex" : "settings.provider.api")}
+                    </option>
+                  ))}
+                </select>
+              </div>
+
+              {config.provider === "api" && (
+                <>
+                  <div className="cm-set-row">
+                    <span className="cm-set-row__label">{t("settings.apiBaseUrl")}</span>
+                    <input
+                      className="cm-input cm-input--url"
+                      value={api.base_url}
+                      placeholder="https://api.openai.com/v1"
+                      spellCheck={false}
+                      onChange={(e) => setApi({ base_url: e.target.value })}
+                      onBlur={() => void useSettingsStore.getState().commitRuntime()}
+                    />
+                  </div>
+                  <div className="cm-set-row">
+                    <span className="cm-set-row__label">{t("settings.apiKey")}</span>
+                    <input
+                      className="cm-input cm-input--secret"
+                      value={api.api_key}
+                      type="password"
+                      placeholder="sk-…"
+                      spellCheck={false}
+                      onChange={(e) => setApi({ api_key: e.target.value })}
+                      onBlur={() => void useSettingsStore.getState().commitRuntime()}
+                    />
+                  </div>
+                  <div className="cm-set-row">
+                    <span className="cm-set-row__label">{t("settings.apiModel")}</span>
+                    <input
+                      className="cm-input cm-input--url"
+                      value={api.model}
+                      placeholder="gpt-image-1"
+                      spellCheck={false}
+                      onChange={(e) => setApi({ model: e.target.value })}
+                      onBlur={() => void useSettingsStore.getState().commitRuntime()}
+                    />
+                  </div>
+                  <div className="cm-set-row">
+                    <span className="cm-set-row__label">{t("settings.apiSize")}</span>
+                    <select
+                      className="cm-select"
+                      value={api.size}
+                      onChange={(e) => {
+                        setApi({ size: e.target.value });
+                        void useSettingsStore.getState().commitRuntime();
+                      }}
+                    >
+                      {IMAGE_SIZES.map((s) => (
+                        <option key={s} value={s}>
+                          {s}
+                        </option>
+                      ))}
+                    </select>
+                  </div>
+                </>
+              )}
+            </div>
+            {applying && <p className="cm-set-hint">{t("settings.runtimeApplying")}</p>}
           </section>
 
           <section className="cm-set-section">

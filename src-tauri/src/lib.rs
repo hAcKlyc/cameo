@@ -1,11 +1,11 @@
 //! Cameo — Tauri 2 entry point.
 //!
 //! Wires up logging, the global `~/.cameo` data dir, the Cameo image protocol,
-//! the Board registry (in-memory doc authority), the Codex runtime
-//! registry (one app-server per Board), and all commands. Codex sessions are
-//! tree-killed on app exit.
+//! the Board registry (in-memory doc authority), the Codex/API runtime
+//! registries, and all commands. Codex sessions are tree-killed on app exit.
 
 pub mod assets;
+pub mod api_runtime;
 pub mod board;
 pub mod codex;
 pub mod commands;
@@ -26,6 +26,7 @@ pub mod storage;
 pub mod tray;
 pub mod workspace;
 
+use api_runtime::ApiRegistry;
 use board::BoardRegistry;
 use codex::CodexRegistry;
 use std::sync::Arc;
@@ -41,6 +42,7 @@ pub fn run() {
 
     let boards: Arc<BoardRegistry> = Arc::new(BoardRegistry::default());
     let codex_reg: Arc<CodexRegistry> = Arc::new(CodexRegistry::default());
+    let api_reg: Arc<ApiRegistry> = Arc::new(ApiRegistry::default());
     let codex_for_exit = codex_reg.clone();
 
     let app = tauri::Builder::default()
@@ -51,6 +53,7 @@ pub fn run() {
         .plugin(tauri_plugin_process::init())
         .manage(boards)
         .manage(codex_reg)
+        .manage(api_reg)
         .setup(|app| {
             // Fire-and-forget background update check (60s delayed inside).
             // Errors are swallowed in the worker — updater never blocks boot.
@@ -132,6 +135,7 @@ pub fn run() {
             commands::get_gen_settings,
             commands::set_gen_settings,
             commands::list_models,
+            commands::list_skills,
             commands::interrupt_turn,
             commands::respond_permission,
             commands::codex_auth_status,

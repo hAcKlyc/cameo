@@ -350,7 +350,7 @@ fn parse_auth_status(res: &Value) -> CodexAuthStatus {
 fn is_supported_auth_method(method: Option<&str>) -> bool {
     matches!(
         method,
-        Some("chatgpt" | "chatgptAuthTokens" | "agentIdentity")
+        Some("chatgpt" | "chatgptAuthTokens" | "agentIdentity" | "apikey")
     )
 }
 
@@ -1247,6 +1247,25 @@ pub struct ModelInfo {
     pub default_service_tier: Option<String>,
 }
 
+#[derive(Debug, Clone, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SkillInputRef {
+    pub name: String,
+    pub path: String,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SkillInfo {
+    pub name: String,
+    pub path: String,
+    pub description: String,
+    pub enabled: bool,
+    pub scope: String,
+    pub display_name: Option<String>,
+    pub short_description: Option<String>,
+}
+
 fn parse_model(m: &Value) -> Option<ModelInfo> {
     let id = m
         .get("id")
@@ -1336,6 +1355,69 @@ pub async fn list_models(
     Ok(out)
 }
 
+fn parse_skill(s: &Value) -> Option<SkillInfo> {
+    let interface = s.get("interface");
+    Some(SkillInfo {
+        name: s.get("name")?.as_str()?.to_string(),
+        path: s.get("path")?.as_str()?.to_string(),
+        description: s
+            .get("description")
+            .and_then(|v| v.as_str())
+            .unwrap_or_default()
+            .to_string(),
+        enabled: s.get("enabled").and_then(|v| v.as_bool()).unwrap_or(true),
+        scope: s
+            .get("scope")
+            .and_then(|v| v.as_str())
+            .unwrap_or_default()
+            .to_string(),
+        display_name: interface
+            .and_then(|i| i.get("displayName"))
+            .and_then(|v| v.as_str())
+            .map(String::from),
+        short_description: interface
+            .and_then(|i| i.get("shortDescription"))
+            .and_then(|v| v.as_str())
+            .or_else(|| s.get("shortDescription").and_then(|v| v.as_str()))
+            .map(String::from),
+    })
+}
+
+/// Enumerate native Codex Skills for the Board's working directory.
+pub async fn list_skills(
+    codex_reg: Arc<CodexRegistry>,
+    board_id: String,
+    force_reload: bool,
+) -> Result<Vec<SkillInfo>, String> {
+    let session = codex_reg.get(&board_id).ok_or("session not started")?;
+    let inner = &session.inner;
+    let res = inner
+        .call(
+            "skills/list",
+            json!({
+                "cwds": [inner.folder.to_string_lossy()],
+                "forceReload": force_reload,
+            }),
+            15_000,
+        )
+        .await?;
+    let mut out = Vec::new();
+    if let Some(entries) = res.get("data").and_then(|v| v.as_array()) {
+        for entry in entries {
+            if let Some(skills) = entry.get("skills").and_then(|v| v.as_array()) {
+                out.extend(skills.iter().filter_map(parse_skill));
+            }
+        }
+    }
+    out.sort_by(|a, b| {
+        let an = a.display_name.as_deref().unwrap_or(&a.name).to_lowercase();
+        let bn = b.display_name.as_deref().unwrap_or(&b.name).to_lowercase();
+        an.cmp(&bn).then_with(|| a.path.cmp(&b.path))
+    });
+    out.dedup_by(|a, b| a.name == b.name && a.path == b.path);
+    Ok(out)
+}
+
 /// Read the Board's saved generation knobs (no live session needed).
 pub fn get_gen_settings(folder: &Path) -> crate::model::GenSettings {
     gen_from_meta(&storage::load_meta(folder))
@@ -1369,15 +1451,37 @@ pub fn set_gen_settings(
 // generated images (thinking / tool steps are live-only process detail).
 
 /// Append the user's message to the active session timeline at turn start.
-fn persist_user_record(inner: &CodexSessionInner, text: &str, refs: &[String]) {
+fn persist_user_record(
+    inner: &CodexSessionInner,
+    text: &str,
+    refs: &[String],
+    skills: &[SkillInputRef],
+) {
     let session_id = inner.active_session_id.lock().clone();
     if session_id.is_empty() {
         return;
     }
+    let display_text = if skills.is_empty() {
+        text.to_string()
+    } else {
+        let skill_line = format!(
+            "Skills: {}",
+            skills
+                .iter()
+                .map(|s| s.name.as_str())
+                .collect::<Vec<_>>()
+                .join(", ")
+        );
+        if text.trim().is_empty() {
+            skill_line
+        } else {
+            format!("{text}\n\n{skill_line}")
+        }
+    };
     let msg = json!({
         "id": nanoid::nanoid!(12),
         "role": "user",
-        "text": text,
+        "text": display_text,
         "refs": refs,
     });
     session::append_message(&inner.folder, &session_id, &msg);
@@ -1559,6 +1663,7 @@ pub async fn send_message(
     text: String,
     source_placement_ids: Vec<String>,
     overlays: Vec<(String, String)>,
+    skills: Vec<SkillInputRef>,
 ) -> Result<(), String> {
     let session = codex_reg.get(&board_id).ok_or("session not started")?;
     let inner = &session.inner;
@@ -1580,13 +1685,15 @@ pub async fn send_message(
         }
     };
     let prompt = build_turn_prompt(&text, &refs);
-    let input = json!([{ "type": "text", "text": prompt, "text_elements": [] }]);
+    let input = build_turn_input(&prompt, &skills);
 
     // Authoritatively persist the user message to the active session timeline at
     // submit time (covers both a fresh turn and a steered input). `text` is the
     // original instruction (not the agent-only reference preamble); refs are the
-    // referenced placement ids — same shape the frontend renders.
-    persist_user_record(inner, &text, &source_placement_ids);
+    // referenced placement ids — same shape the frontend renders. Skill names
+    // are persisted for chat history display only; the native skill inputs stay
+    // separate in `input[]`.
+    persist_user_record(inner, &text, &source_placement_ids, &skills);
 
     let active_turn_id = { inner.current_turn_id.lock().clone() };
     if let Some(turn_id) = active_turn_id {
@@ -1681,6 +1788,18 @@ pub async fn send_message(
     tracing::info!(module = "codex", refs = refs.len(), "turn/start ok");
     flush_pending_steers(inner).await;
     Ok(())
+}
+
+fn build_turn_input(prompt: &str, skills: &[SkillInputRef]) -> Value {
+    let mut input = vec![json!({ "type": "text", "text": prompt, "text_elements": [] })];
+    for skill in skills {
+        input.push(json!({
+            "type": "skill",
+            "name": skill.name,
+            "path": skill.path,
+        }));
+    }
+    Value::Array(input)
 }
 
 fn build_turn_prompt(text: &str, refs: &[(String, Option<String>)]) -> String {
@@ -2626,7 +2745,7 @@ mod tests {
     }
 
     #[test]
-    fn auth_status_rejects_api_key_for_cameo() {
+    fn auth_status_accepts_api_key_for_codex_runtime() {
         let auth = parse_auth_status(&json!({
             "authMethod": "apikey",
             "authToken": null,
@@ -2635,7 +2754,7 @@ mod tests {
 
         assert_eq!(auth.auth_method.as_deref(), Some("apikey"));
         assert!(!auth.requires_login);
-        assert!(!auth.auth_supported);
+        assert!(auth.auth_supported);
     }
 
     #[test]

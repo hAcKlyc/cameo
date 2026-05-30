@@ -202,14 +202,22 @@ hidden, isDefault, supportsPersonality, additionalSpeedTiers(deprecated), inputM
 ## 7. 图像 I/O（Cameo 的命脉）
 
 ### 输入
-`turn/start` 的 `input[]` 支持三类 `UserInput`：
+`turn/start` 的 `input[]` 支持四类 `UserInput`：
 - `{ type:"text", text, text_elements:[] }`
 - `{ type:"image", url, detail? }`（远程 URL）
 - `{ type:"localImage", path, detail? }`（本地路径，`detail` ∈ low/high/auto）
+- `{ type:"skill", name, path }`（原生 Codex Skill，`path` 为本地绝对路径）
 
 **Cameo 现状（决策 D4）**：只用 `text`，把引用图/overlay 的**路径内嵌在文本里**，让 Codex 自己
 `read`（`codex.rs:1369` + `build_turn_prompt`）。代价是模型要先发一次读图工具调用（多一次往返），
 收益是实现简单、不挂字节。**引用图自动 `localImage` 预挂图** = 未来项，需先 push-back D4。
+
+### 原生 Skills
+
+Codex app-server 暴露 `skills/list`，参数为 `{ cwds, forceReload }`，返回每个 cwd 下的
+`skills[]`（`name/path/description/enabled/scope/interface`）。Cameo 只在 Codex runtime 显示
+这些 Skill，并在 `turn/start` / `turn/steer` 的 `input[]` 中附加 `{ type:"skill", name, path }`。
+API runtime 不支持该协议能力，因此不把 Skill 降级为 prompt。
 
 ### 输出 — `imageGeneration` item
 Codex 包了 OpenAI 的 `image_generation_call`（不是 MCP 工具）。完成的 item 两种形态，**按序都处理**：
