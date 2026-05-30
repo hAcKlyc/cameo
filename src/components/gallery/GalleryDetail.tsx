@@ -3,6 +3,7 @@ import { X, Copy, AlertCircle, ExternalLink } from "lucide-react";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { useT } from "../../i18n/locale";
 import type { GalleryItem } from "../../services/cloud/gallery";
+import { proxiedImg } from "../../services/cloud";
 import { useComposerStore } from "../../store/composer";
 
 interface Props {
@@ -62,7 +63,7 @@ export function GalleryDetail({ item, onClose, onUsePrompt }: Props) {
         </button>
 
         <div className="cm-gdetail__media">
-          <img src={item.img_full || item.img} alt={title || item.id} />
+          <img src={proxiedImg(item.img_full || item.img)} alt={title || item.id} />
         </div>
 
         <div className="cm-gdetail__body">

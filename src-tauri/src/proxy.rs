@@ -44,7 +44,7 @@ const PROBE_HANDSHAKE_TIMEOUT_MS: u64 = 5_000;
 const PROBE_RESPONSE_HEAD_MAX_BYTES: usize = 4096;
 const PROBE_USER_AGENT: &str = "Cameo-Proxy-Probe/1.0";
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ProxySettings {
     pub enabled: bool,
     /// "http" | "socks5". The configured proxy is used for HTTP, HTTPS, and WSS

@@ -116,6 +116,103 @@ fn error_response(code: StatusCode, msg: &str) -> Response<Vec<u8>> {
         .unwrap()
 }
 
+// ── cmnet:// — proxied remote fetch (gallery images) ─────────────────────────
+//
+// WebView `<img src=https://…>` loads bypass the app proxy. Routing them through
+// this scheme makes the proxied `net::client` fetch the bytes, so gallery
+// thumbnails/detail images honor Settings → Proxy like every other egress.
+// URL shape: `cmnet://localhost/<percent-encoded-https-url>` (WebKit) /
+// `http://cmnet.localhost/<…>` (WebView2).
+
+/// Decode the wrapped remote URL from a cmnet request path.
+fn parse_cmnet_uri(uri: &Uri) -> Option<String> {
+    let path = uri.path().trim_start_matches('/');
+    if path.is_empty() {
+        return None;
+    }
+    urlencoding::decode(path).ok().map(|c| c.into_owned())
+}
+
+/// SSRF guard: only public https URLs. Blocks loopback / link-local / private
+/// ranges so this proxy can't be turned into a probe of the user's intranet.
+fn is_allowed_remote(url: &str) -> bool {
+    let Ok(parsed) = reqwest::Url::parse(url) else {
+        return false;
+    };
+    if parsed.scheme() != "https" {
+        return false;
+    }
+    let Some(host) = parsed.host_str() else {
+        return false;
+    };
+    let h = host.to_lowercase();
+    if h == "localhost" || h.ends_with(".localhost") || h.ends_with(".local") {
+        return false;
+    }
+    // Block obvious private / loopback / link-local literals.
+    if let Ok(ip) = h.parse::<std::net::IpAddr>() {
+        match ip {
+            std::net::IpAddr::V4(v4) => {
+                if v4.is_loopback() || v4.is_private() || v4.is_link_local() || v4.is_unspecified() {
+                    return false;
+                }
+            }
+            std::net::IpAddr::V6(v6) => {
+                if v6.is_loopback() || v6.is_unspecified() {
+                    return false;
+                }
+            }
+        }
+    }
+    true
+}
+
+pub fn handle_cmnet_uri<R: tauri::Runtime>(
+    _ctx: UriSchemeContext<'_, R>,
+    request: Request<Vec<u8>>,
+    responder: tauri::UriSchemeResponder,
+) {
+    let Some(url) = parse_cmnet_uri(request.uri()) else {
+        responder.respond(error_response(StatusCode::BAD_REQUEST, "missing url in cmnet:// request"));
+        return;
+    };
+    if !is_allowed_remote(&url) {
+        responder.respond(error_response(StatusCode::FORBIDDEN, "only public https URLs allowed"));
+        return;
+    }
+    tauri::async_runtime::spawn(async move {
+        let resp = match crate::net::client().get(&url).send().await {
+            Ok(r) => r,
+            Err(e) => {
+                responder.respond(error_response(StatusCode::BAD_GATEWAY, &format!("fetch failed: {e}")));
+                return;
+            }
+        };
+        let status = resp.status();
+        let mime = resp
+            .headers()
+            .get(header::CONTENT_TYPE)
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("application/octet-stream")
+            .to_string();
+        let bytes = match resp.bytes().await {
+            Ok(b) => b.to_vec(),
+            Err(e) => {
+                responder.respond(error_response(StatusCode::BAD_GATEWAY, &format!("read failed: {e}")));
+                return;
+            }
+        };
+        let out = Response::builder()
+            .status(StatusCode::from_u16(status.as_u16()).unwrap_or(StatusCode::OK))
+            .header(header::CONTENT_TYPE, mime)
+            .header("Access-Control-Allow-Origin", "*")
+            .header(header::CACHE_CONTROL, "public, max-age=3600")
+            .body(bytes)
+            .unwrap_or_else(|_| error_response(StatusCode::INTERNAL_SERVER_ERROR, "build response"));
+        responder.respond(out);
+    });
+}
+
 #[cfg(test)]
 mod tests {
     use super::parse_cameo_uri;

@@ -14,6 +14,7 @@ pub mod device;
 pub mod logging;
 pub mod updater;
 pub mod model;
+pub mod net;
 pub mod paths;
 pub mod process;
 pub mod prompt;
@@ -78,10 +79,13 @@ pub fn run() {
             }
         })
         .register_uri_scheme_protocol("cameo", protocol::handle_cameo_uri)
+        // Proxied remote fetch for gallery images — see protocol::handle_cmnet_uri.
+        .register_asynchronous_uri_scheme_protocol("cmnet", protocol::handle_cmnet_uri)
         .invoke_handler(tauri::generate_handler![
             ping,
             app_version,
             front_log,
+            commands::cloud_request,
             commands::cfg_load,
             commands::cfg_save,
             commands::probe_proxy,

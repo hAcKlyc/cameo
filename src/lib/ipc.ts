@@ -27,6 +27,16 @@ export const ipc = {
   frontLog: (level: "info" | "warn" | "error", msg: string) =>
     invoke<void>("front_log", { level, msg }),
 
+  /** Proxied transport for the cloud API (gallery + telemetry). Routes through
+   *  Rust's single proxied client so cloud traffic honors Settings → Proxy —
+   *  the WebView's own fetch cannot. See services/cloud/index.ts. */
+  cloudRequest: (req: {
+    url: string;
+    method: string;
+    headers: Record<string, string>;
+    body?: string;
+  }) => invoke<{ status: number; body: string }>("cloud_request", { req }),
+
   initialBoard: () => invoke<string | null>("initial_board"),
 
   initialTestPrompt: () => invoke<string | null>("initial_test_prompt"),

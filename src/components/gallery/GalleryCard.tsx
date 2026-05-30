@@ -1,5 +1,6 @@
 import { AlertCircle } from "lucide-react";
 import type { GalleryItem } from "../../services/cloud/gallery";
+import { proxiedImg } from "../../services/cloud";
 import { useT } from "../../i18n/locale";
 
 /**
@@ -15,7 +16,7 @@ export function GalleryCard({ item, onOpen }: { item: GalleryItem; onOpen: () =>
     <button type="button" className="cm-gcard" onClick={onOpen}>
       <div className="cm-gcard__media" style={{ aspectRatio: ratio }}>
         {item.img ? (
-          <img src={item.img} alt={title || item.id} loading="lazy" />
+          <img src={proxiedImg(item.img)} alt={title || item.id} loading="lazy" />
         ) : (
           <div className="cm-gcard__noimg" />
         )}

@@ -1261,6 +1261,46 @@ pub fn load_session(
     Ok(session::load_timeline(&folder, &session_id))
 }
 
+// ── Cloud API transport (proxied) ────────────────────────────────────────────
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CloudRequest {
+    pub url: String,
+    pub method: String,
+    #[serde(default)]
+    pub headers: std::collections::HashMap<String, String>,
+    pub body: Option<String>,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CloudResponse {
+    pub status: u16,
+    pub body: String,
+}
+
+/// Transport for the frontend cloud client (gallery + telemetry). Routes through
+/// the proxied `net::client` so cloud API traffic honors Settings → Proxy — the
+/// WebView's own `fetch` cannot. The frontend keeps auth-header injection and
+/// error mapping; this only carries bytes.
+#[tauri::command]
+pub async fn cloud_request(req: CloudRequest) -> Result<CloudResponse, String> {
+    let method = reqwest::Method::from_bytes(req.method.as_bytes())
+        .map_err(|_| format!("bad method: {}", req.method))?;
+    let mut rb = crate::net::client().request(method, &req.url);
+    for (k, v) in &req.headers {
+        rb = rb.header(k, v);
+    }
+    if let Some(body) = req.body {
+        rb = rb.body(body);
+    }
+    let resp = rb.send().await.map_err(|e| format!("network_error: {e}"))?;
+    let status = resp.status().as_u16();
+    let body = resp.text().await.unwrap_or_default();
+    Ok(CloudResponse { status, body })
+}
+
 // ── App config (global ~/.cameo/config.json) + diagnostics ───────────────────
 
 /// Load the global app config (network proxy etc.). Missing/corrupt → defaults.

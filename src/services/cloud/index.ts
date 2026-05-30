@@ -13,7 +13,25 @@
  * short-circuits into a pure local tool.
  */
 
+import { convertFileSrc } from "@tauri-apps/api/core";
 import { ipc } from "../../lib/ipc";
+
+/**
+ * Wrap a remote https image URL so the WebView loads it through Rust's proxied
+ * client (the `cmnet://` scheme) instead of going direct — gallery thumbnails /
+ * detail images then honor Settings → Proxy like every other egress. Reuses
+ * Tauri's `convertFileSrc` for the platform-correct scheme origin + encoding
+ * (same approach as `cameoUrl`). Non-https / empty → returned unchanged.
+ */
+export function proxiedImg(url: string | null | undefined): string {
+  if (!url) return "";
+  if (!/^https:\/\//i.test(url)) return url;
+  try {
+    return convertFileSrc(url, "cmnet");
+  } catch {
+    return url; // browser-only dev shell without Tauri internals
+  }
+}
 
 export const CLOUD_API_BASE = import.meta.env.VITE_CAMEO_API_BASE as
   | string
@@ -70,34 +88,53 @@ export class CloudError extends Error {
  *   429  → daily quota exhausted
  *   5xx  → transient, throw with code='server_error' for callers to back off
  */
-export async function cloudFetch(
+export async function cloudFetch<T = unknown>(
   path: string,
   init?: RequestInit & { skipDeviceId?: boolean; signal?: AbortSignal },
-): Promise<Response> {
+): Promise<T> {
   if (!CLOUD_ENABLED) throw new CloudError(0, "disabled", "cloud module not built in");
-  const headers = new Headers(init?.headers);
-  headers.set("X-API-Key", CLOUD_API_KEY!);
-  if (!init?.skipDeviceId) {
-    headers.set("X-Device-Id", await getDeviceId());
+  // Transport goes through Rust (ipc.cloudRequest) so cloud traffic honors the
+  // configured proxy; the WebView's own `fetch` would ignore it. Auth-header
+  // injection + error normalization stay here.
+  const headers: Record<string, string> = {};
+  if (init?.headers) new Headers(init.headers).forEach((v, k) => { headers[k] = v; });
+  headers["X-API-Key"] = CLOUD_API_KEY!;
+  if (!init?.skipDeviceId) headers["X-Device-Id"] = await getDeviceId();
+  headers["X-App-Version"] = appVersion();
+  if (init?.body && !Object.keys(headers).some((k) => k.toLowerCase() === "content-type")) {
+    headers["Content-Type"] = "application/json";
   }
-  headers.set("X-App-Version", appVersion());
-  if (init?.body && !headers.has("Content-Type")) {
-    headers.set("Content-Type", "application/json");
-  }
-  const url = `${CLOUD_API_BASE}${path}`;
-  let res: Response;
+
+  // The Rust command can't be cancelled mid-flight; honor the signal at the
+  // boundaries so a closed overlay still discards its stale result (callers
+  // distinguish AbortError from a real network failure).
+  const throwIfAborted = () => {
+    if (init?.signal?.aborted) {
+      const e = new Error("Aborted");
+      e.name = "AbortError";
+      throw e;
+    }
+  };
+  throwIfAborted();
+  let res: { status: number; body: string };
   try {
-    res = await fetch(url, { ...init, headers });
+    res = await ipc.cloudRequest({
+      url: `${CLOUD_API_BASE}${path}`,
+      method: init?.method ?? "GET",
+      headers,
+      body: typeof init?.body === "string" ? init.body : undefined,
+    });
   } catch (e) {
-    // Preserve AbortError so callers can distinguish "user navigated away"
-    // from a real network failure (CloudError noise on close = bad UX).
-    if ((e as Error).name === "AbortError") throw e;
     throw new CloudError(0, "network_error", (e as Error).message);
   }
-  if (res.ok) return res;
+  throwIfAborted();
+
+  if (res.status >= 200 && res.status < 300) {
+    return (res.body ? JSON.parse(res.body) : null) as T;
+  }
   let bodyCode = "http_error";
   try {
-    const body = (await res.clone().json()) as { error?: string };
+    const body = JSON.parse(res.body) as { error?: string };
     if (body?.error) bodyCode = body.error;
   } catch {
     /* ignore */

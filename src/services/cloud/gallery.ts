@@ -61,13 +61,11 @@ export async function fetchItems(params: ItemsParams = {}, opts?: FetchOpts): Pr
     if (v === undefined || v === "" || v === null) continue;
     qs.set(k, String(v));
   }
-  const res = await cloudFetch(`/api/v1/gallery/items?${qs.toString()}`, { signal: opts?.signal });
-  return res.json();
+  return cloudFetch<ItemsResponse>(`/api/v1/gallery/items?${qs.toString()}`, { signal: opts?.signal });
 }
 
 export async function fetchFacets(opts?: FetchOpts): Promise<{ use_case: Facet[]; lang: Facet[] }> {
-  const res = await cloudFetch("/api/v1/gallery/facets", { signal: opts?.signal });
-  return res.json();
+  return cloudFetch<{ use_case: Facet[]; lang: Facet[] }>("/api/v1/gallery/facets", { signal: opts?.signal });
 }
 
 export async function fetchRandom(opts?: { use_case?: string; requires_input_image?: boolean; signal?: AbortSignal }): Promise<GalleryItem> {
@@ -75,6 +73,5 @@ export async function fetchRandom(opts?: { use_case?: string; requires_input_ima
   if (opts?.use_case) qs.set("use_case", opts.use_case);
   if (opts?.requires_input_image) qs.set("requires_input_image", "true");
   const path = qs.toString() ? `/api/v1/gallery/random?${qs}` : "/api/v1/gallery/random";
-  const res = await cloudFetch(path, { signal: opts?.signal });
-  return res.json();
+  return cloudFetch<GalleryItem>(path, { signal: opts?.signal });
 }
