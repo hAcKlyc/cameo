@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { ImagePlus, ArrowUp, Square } from "lucide-react";
+import { ImagePlus, ArrowUp, Sparkles, Square, X } from "lucide-react";
 import { open } from "@tauri-apps/plugin-dialog";
 import { useT } from "../i18n/locale";
 import { useBoardStore } from "../store/board";
@@ -10,6 +10,8 @@ import { buildOverlays, buildMarkNotes, annotatedImages } from "../lib/overlay";
 import { GalleryButton } from "./gallery/GalleryButton";
 import { GenSettingsMenu } from "./GenSettingsMenu";
 import { useGenStore } from "../store/genSettings";
+import { useSettingsStore } from "../store/settings";
+import type { SkillInfo, SkillInputRef } from "../types";
 
 function stem(path: string): string {
   const base = path.split(/[/\\]/).pop() ?? path;
@@ -38,13 +40,19 @@ function sendErrorMessage(e: unknown): string {
  */
 export function Composer() {
   const editorRef = useRef<HTMLDivElement>(null);
+  const skillMenuRef = useRef<HTMLDivElement>(null);
   const lastRange = useRef<Range | null>(null);
   const syncing = useRef(false);
 
   const sessionStatus = useChatStore((s) => s.sessionStatus);
   const turnStatus = useChatStore((s) => s.turnStatus);
   const boardId = useBoardStore((s) => s.boardId);
+  const provider = useSettingsStore((s) => s.config.provider);
   const [hasContent, setHasContent] = useState(false);
+  const [skills, setSkills] = useState<SkillInfo[]>([]);
+  const [selectedSkills, setSelectedSkills] = useState<SkillInputRef[]>([]);
+  const [skillsOpen, setSkillsOpen] = useState(false);
+  const [skillsError, setSkillsError] = useState<string | null>(null);
   const t = useT();
 
   const ready = !!boardId && sessionStatus === "ready";
@@ -267,8 +275,65 @@ export function Composer() {
     if (boardId) void useGenStore.getState().load(boardId);
   }, [boardId]);
   useEffect(() => {
-    if (boardId && sessionStatus === "ready") void useGenStore.getState().fetchModels(boardId);
-  }, [boardId, sessionStatus]);
+    if (provider === "codex" && boardId && sessionStatus === "ready") {
+      void useGenStore.getState().fetchModels(boardId);
+    }
+  }, [boardId, provider, sessionStatus]);
+
+  useEffect(() => {
+    let cancelled = false;
+    setSkillsOpen(false);
+    setSelectedSkills([]);
+    if (provider !== "codex" || !boardId || sessionStatus !== "ready") {
+      setSkills([]);
+      setSkillsError(null);
+      return () => {
+        cancelled = true;
+      };
+    }
+    setSkillsError(null);
+    void ipc
+      .listSkills(boardId)
+      .then((items) => {
+        if (!cancelled) setSkills(items);
+      })
+      .catch((e) => {
+        if (!cancelled) {
+          setSkills([]);
+          setSkillsError(e instanceof Error ? e.message : String(e));
+        }
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [boardId, provider, sessionStatus]);
+
+  useEffect(() => {
+    const onPointerDown = (e: PointerEvent) => {
+      const root = skillMenuRef.current;
+      if (root && !root.contains(e.target as Node)) setSkillsOpen(false);
+    };
+    document.addEventListener("pointerdown", onPointerDown);
+    return () => document.removeEventListener("pointerdown", onPointerDown);
+  }, []);
+
+  const skillLabel = (skill: SkillInputRef): string => {
+    const full = skills.find((s) => s.name === skill.name && s.path === skill.path);
+    return full?.displayName || full?.name || skill.name;
+  };
+
+  const toggleSkill = (skill: SkillInfo) => {
+    if (!skill.enabled) return;
+    setSelectedSkills((current) => {
+      const exists = current.some((s) => s.name === skill.name && s.path === skill.path);
+      if (exists) return current.filter((s) => !(s.name === skill.name && s.path === skill.path));
+      return [...current, { name: skill.name, path: skill.path }];
+    });
+  };
+
+  const removeSkill = (skill: SkillInputRef) => {
+    setSelectedSkills((current) => current.filter((s) => !(s.name === skill.name && s.path === skill.path)));
+  };
 
   // ── dispatch ───────────────────────────────────────────────────────────
   const extract = (): { text: string; refs: string[] } => {
@@ -314,13 +379,19 @@ export function Composer() {
     // Mark notes go at the START of the message (formatted), then the free text.
     const notes = buildMarkNotes(allRefs);
     const instruction = [notes, text].filter((s) => s.trim()).join("\n\n");
-    if (!instruction.trim() && allRefs.length === 0) return;
-    const turn = useChatStore.getState().startTurn(instruction, allRefs);
+    const skillsForTurn = selectedSkills;
+    if (!instruction.trim() && allRefs.length === 0 && skillsForTurn.length === 0) return;
+    const skillLine = skillsForTurn.length
+      ? t("composer.skillsLine", { names: skillsForTurn.map(skillLabel).join(", ") })
+      : "";
+    const visibleInstruction = [instruction, skillLine].filter((s) => s.trim()).join("\n\n");
+    const turn = useChatStore.getState().startTurn(visibleInstruction, allRefs);
     clearEditor();
     void (async () => {
       try {
         const overlays = await buildOverlays(boardId, allRefs);
-        await ipc.sendMessage(boardId, instruction, allRefs, overlays);
+        await ipc.sendMessage(boardId, instruction, allRefs, overlays, skillsForTurn);
+        setSelectedSkills([]);
         // Consume marks only after the turn was actually sent (not on failure).
         useBoardStore.getState().consumeMarks(allRefs);
       } catch (e) {
@@ -344,8 +415,10 @@ export function Composer() {
   const placeholder = ready
     ? t("composer.placeholder")
     : sessionStatus === "starting"
-      ? t("composer.starting")
-      : t("composer.notReady");
+      ? t(provider === "api" ? "composer.startingApi" : "composer.starting")
+      : t(provider === "api" ? "composer.notReadyApi" : "composer.notReady");
+
+  const canSend = ready && (hasContent || selectedSkills.length > 0);
 
   // External → Composer one-shot injections (Gallery prompt OR chat
   // inline-image pill). Watching `nonce` (not the payloads themselves) makes
@@ -435,14 +508,73 @@ export function Composer() {
           >
             <ImagePlus size={17} />
           </button>
+          {provider === "codex" && (
+            <>
+              <div className="cm-skillpick" ref={skillMenuRef}>
+                <button
+                  className={`cm-composer__add cm-skillpick__button${selectedSkills.length ? " cm-skillpick__button--active" : ""}`}
+                  data-tip={t("composer.skills")}
+                  aria-label={t("composer.skills")}
+                  aria-expanded={skillsOpen}
+                  disabled={!ready}
+                  onClick={() => setSkillsOpen((v) => !v)}
+                >
+                  <Sparkles size={16} />
+                </button>
+                {skillsOpen && (
+                  <div className="cm-skillpick__menu" role="menu">
+                    {skillsError ? (
+                      <div className="cm-skillpick__empty">{t("composer.skillsError")}</div>
+                    ) : skills.length === 0 ? (
+                      <div className="cm-skillpick__empty">{t("composer.skillsEmpty")}</div>
+                    ) : (
+                      skills.map((skill) => {
+                        const selected = selectedSkills.some((s) => s.name === skill.name && s.path === skill.path);
+                        const label = skill.displayName || skill.name;
+                        const desc = skill.shortDescription || skill.description;
+                        return (
+                          <button
+                            key={`${skill.name}:${skill.path}`}
+                            className={`cm-skillpick__item${selected ? " cm-skillpick__item--selected" : ""}`}
+                            disabled={!skill.enabled}
+                            role="menuitemcheckbox"
+                            aria-checked={selected}
+                            onClick={() => toggleSkill(skill)}
+                          >
+                            <span className="cm-skillpick__name">{label}</span>
+                            {desc && <span className="cm-skillpick__desc">{desc}</span>}
+                          </button>
+                        );
+                      })
+                    )}
+                  </div>
+                )}
+              </div>
+              {selectedSkills.length > 0 && (
+                <div className="cm-skillchips">
+                  {selectedSkills.map((skill) => (
+                    <button
+                      key={`${skill.name}:${skill.path}`}
+                      className="cm-skillchip"
+                      title={skillLabel(skill)}
+                      onClick={() => removeSkill(skill)}
+                    >
+                      <span>{skillLabel(skill)}</span>
+                      <X size={12} />
+                    </button>
+                  ))}
+                </div>
+              )}
+            </>
+          )}
           <div className="cm-composer__barspacer" />
-          <GenSettingsMenu />
+          {provider === "codex" && <GenSettingsMenu />}
           {running ? (
             <button className="cm-send cm-send--stop" title={t("composer.stop")} onClick={stop}>
               <Square size={12} fill="currentColor" strokeWidth={0} />
             </button>
           ) : (
-            <button className="cm-send" title={t("composer.send")} onClick={() => dispatch()} disabled={!ready || !hasContent}>
+            <button className="cm-send" title={t("composer.send")} onClick={() => dispatch()} disabled={!canSend}>
               <ArrowUp size={18} />
             </button>
           )}

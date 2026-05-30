@@ -47,7 +47,9 @@ function isCodexSetupError(e: unknown) {
   return (
     msg.includes("codex is installed but not logged in") ||
     msg.includes("cameo requires codex signed in") ||
-    msg.includes("codex not found in augmented path")
+    msg.includes("codex not found in augmented path") ||
+    msg.includes("api base url is required") ||
+    msg.includes("api image model is required")
   );
 }
 
