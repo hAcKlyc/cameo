@@ -341,10 +341,80 @@ function QuotaRow({
   );
 }
 
-/** Clickable agent capsule that drops a status panel: Codex detection (path +
- *  version) + connection state, or install guidance when not found. Runtime-
- *  agnostic — a future agent just swaps the icon/name + detection source. */
 function AgentStatus({ status, rateLimit }: { status: SessionStatus; rateLimit: RateLimit | null }) {
+  const provider = useSettingsStore((s) => s.config.provider);
+  return provider === "api" ? (
+    <ApiAgentStatus status={status} />
+  ) : (
+    <CodexAgentStatus status={status} rateLimit={rateLimit} />
+  );
+}
+
+function ApiAgentStatus({ status }: { status: SessionStatus }) {
+  const [open, setOpen] = useState(false);
+  const ref = useRef<HTMLDivElement>(null);
+  const api = useSettingsStore((s) => s.config.api);
+  const t = useT();
+  const configured = !!api.base_url.trim() && !!api.model.trim();
+  const displayStatus: SessionStatus = configured ? status : "error";
+  const statusLabel = configured ? t(`agent.status.${status}` as MsgKey) : t("composer.notReadyApi");
+
+  useEffect(() => {
+    if (!open) return;
+    const onDown = (e: PointerEvent) => {
+      if (!ref.current?.contains(e.target as Node)) setOpen(false);
+    };
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") setOpen(false);
+    };
+    window.addEventListener("pointerdown", onDown);
+    window.addEventListener("keydown", onKey);
+    return () => {
+      window.removeEventListener("pointerdown", onDown);
+      window.removeEventListener("keydown", onKey);
+    };
+  }, [open]);
+
+  return (
+    <div className="cm-agent-wrap" ref={ref}>
+      <button className="cm-agent" title={`API · ${statusLabel}`} onClick={() => setOpen((o) => !o)}>
+        <ImageIcon className="cm-agent__icon" size={16} />
+        <span className="cm-agent__name">API</span>
+        <span className="cm-agent__dot" data-status={displayStatus} aria-hidden />
+        <ChevronDown size={13} className="cm-agent__caret" />
+      </button>
+      {open && (
+        <div className="cm-agent-pop">
+          <div className="cm-agent-pop__row">
+            <span className="cm-agent-pop__k">{t("agent.connection")}</span>
+            <span className="cm-agent-pop__status">
+              <span className="cm-agent__dot" data-status={displayStatus} aria-hidden />
+              {statusLabel}
+            </span>
+          </div>
+          <div className="cm-agent-pop__row">
+            <span className="cm-agent-pop__k">{t("agent.provider")}</span>
+            <span className="cm-agent-pop__v">{t("agent.provider.api")}</span>
+          </div>
+          <div className="cm-agent-pop__row">
+            <span className="cm-agent-pop__k">{t("agent.endpoint")}</span>
+            <span className="cm-agent-pop__v cm-agent-pop__path" title={api.base_url}>
+              {api.base_url || "—"}
+            </span>
+          </div>
+          <div className="cm-agent-pop__row">
+            <span className="cm-agent-pop__k">{t("agent.model")}</span>
+            <span className="cm-agent-pop__v">{api.model || "—"}</span>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+/** Clickable agent capsule that drops a status panel: Codex detection (path +
+ *  version) + connection state, or install guidance when not found. */
+function CodexAgentStatus({ status, rateLimit }: { status: SessionStatus; rateLimit: RateLimit | null }) {
   const [open, setOpen] = useState(false);
   const [info, setInfo] = useState<CodexInfo | null>(null);
   const [auth, setAuth] = useState<AuthProbeState>({ status: "idle" });
@@ -780,6 +850,7 @@ export function ChatPanel({ onOpenSettings }: { onOpenSettings: () => void }) {
   const chatWidth = useUiStore((s) => s.chatWidth);
   const setChatWidth = useUiStore((s) => s.setChatWidth);
   const restartNonce = useSettingsStore((s) => s.restartNonce);
+  const provider = useSettingsStore((s) => s.config.provider);
   const [networkBlocked, setNetworkBlocked] = useState(false);
   const scrollRef = useRef<HTMLDivElement>(null);
   const cleanupResizeRef = useRef<(() => void) | null>(null);
@@ -793,6 +864,11 @@ export function ChatPanel({ onOpenSettings }: { onOpenSettings: () => void }) {
   }, [messages]);
 
   useEffect(() => {
+    if (provider !== "codex") {
+      networkProbeGenerationRef.current += 1;
+      setNetworkBlocked(false);
+      return;
+    }
     if (sessionStatus === "starting") {
       networkProbeGenerationRef.current += 1;
       setNetworkBlocked(false);
@@ -823,7 +899,7 @@ export function ChatPanel({ onOpenSettings }: { onOpenSettings: () => void }) {
       window.clearTimeout(timer);
       networkProbeGenerationRef.current += 1;
     };
-  }, [restartNonce, sessionStatus]);
+  }, [provider, restartNonce, sessionStatus]);
 
   useEffect(() => {
     return () => {

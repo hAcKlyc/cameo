@@ -1,15 +1,51 @@
 //! Global app config — `~/.cameo/config.json`. App-level settings that are NOT
-//! tied to any one Board (currently: the network proxy). Atomic tmp+rename
-//! write, like the Board doc (storage.rs).
+//! tied to any one Board (runtime provider/API settings, network proxy, etc.).
+//! Atomic tmp+rename write, like the Board doc (storage.rs).
 
 use crate::paths::app_config_path;
 use crate::proxy::ProxySettings;
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum RuntimeProvider {
+    Codex,
+    Api,
+}
+
+impl Default for RuntimeProvider {
+    fn default() -> Self {
+        RuntimeProvider::Codex
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ApiImageSettings {
+    pub base_url: String,
+    pub api_key: String,
+    pub model: String,
+    pub size: String,
+}
+
+impl Default for ApiImageSettings {
+    fn default() -> Self {
+        Self {
+            base_url: "https://api.openai.com/v1".into(),
+            api_key: String::new(),
+            model: "gpt-image-1".into(),
+            size: "1024x1024".into(),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct AppConfig {
+    /// Which runtime backs the composer: local Codex sidecar or OpenAI-compatible
+    /// image API. Default stays Codex for existing installs.
+    pub provider: RuntimeProvider,
+    pub api: ApiImageSettings,
     pub proxy: ProxySettings,
     /// Disable anonymous usage telemetry (default: false = enabled).
     /// Note: the one-time device registration on first launch is identity
@@ -29,6 +65,8 @@ pub struct AppConfig {
 impl Default for AppConfig {
     fn default() -> Self {
         Self {
+            provider: RuntimeProvider::Codex,
+            api: ApiImageSettings::default(),
             proxy: ProxySettings::default(),
             telemetry_opt_out: false,
             last_telemetry_date: None,

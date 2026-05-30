@@ -1355,6 +1355,114 @@ body.cm-chat-resizing {
   cursor: default;
 }
 
+.cm-skillpick {
+  position: relative;
+}
+.cm-skillpick__button--active {
+  background: var(--cm-accent-bg);
+  color: var(--cm-accent-text);
+}
+.cm-skillpick__menu {
+  position: absolute;
+  left: 0;
+  bottom: 38px;
+  z-index: 30;
+  width: min(320px, calc(100vw - 32px));
+  max-height: 280px;
+  overflow-y: auto;
+  padding: 6px;
+  background: var(--cm-surface);
+  border: 1px solid var(--cm-line);
+  border-radius: var(--cm-radius-md);
+  box-shadow: var(--cm-shadow-3);
+}
+.cm-skillpick__item {
+  appearance: none;
+  width: 100%;
+  border: 1px solid transparent;
+  background: transparent;
+  color: var(--cm-fg);
+  text-align: left;
+  padding: 7px 8px;
+  border-radius: var(--cm-radius-sm);
+  cursor: pointer;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.cm-skillpick__item:hover:not(:disabled),
+.cm-skillpick__item--active:not(:disabled) {
+  background: var(--cm-gray-50);
+}
+.cm-skillpick__item--selected {
+  background: var(--cm-accent-bg);
+  border-color: var(--cm-brand-200);
+}
+.cm-skillpick__item:disabled {
+  opacity: 0.45;
+  cursor: default;
+}
+.cm-skillpick__name {
+  font-size: 12px;
+  font-weight: 650;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.cm-skillpick__desc {
+  color: var(--cm-fg-secondary);
+  font-size: 11px;
+  line-height: 1.3;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+.cm-skillpick__empty {
+  color: var(--cm-fg-secondary);
+  font-size: 12px;
+  padding: 8px;
+}
+.cm-skillpick__query {
+  color: var(--cm-fg-secondary);
+  font-size: 11px;
+  font-weight: 650;
+  padding: 5px 8px 7px;
+  border-bottom: 1px solid var(--cm-line);
+  margin-bottom: 4px;
+}
+.cm-skillchips {
+  min-width: 0;
+  display: flex;
+  gap: 4px;
+  overflow: hidden;
+}
+.cm-skillchip {
+  appearance: none;
+  border: 1px solid var(--cm-line);
+  background: var(--cm-surface);
+  color: var(--cm-fg-secondary);
+  max-width: 132px;
+  height: 26px;
+  padding: 0 7px;
+  border-radius: var(--cm-radius-pill);
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font: inherit;
+  font-size: 11px;
+}
+.cm-skillchip:hover {
+  background: var(--cm-gray-50);
+  color: var(--cm-fg);
+}
+.cm-skillchip span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 /* Rich contenteditable input with inline reference pills (3 lines → 8 max). */
 .cm-rich {
   min-height: 78px;
@@ -2612,6 +2720,10 @@ body.cm-chat-resizing {
 }
 .cm-input--host {
   width: 150px;
+}
+.cm-input--url,
+.cm-input--secret {
+  width: 230px;
 }
 /* A standalone action button inside a section (e.g. open log folder). */
 .cm-set-action {

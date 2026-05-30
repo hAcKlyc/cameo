@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { ImagePlus, ArrowUp, Square } from "lucide-react";
+import { ImagePlus, ArrowUp, Sparkles, Square, X } from "lucide-react";
 import { open } from "@tauri-apps/plugin-dialog";
 import { useT } from "../i18n/locale";
 import { useBoardStore } from "../store/board";
@@ -10,6 +10,8 @@ import { buildOverlays, buildMarkNotes, annotatedImages } from "../lib/overlay";
 import { GalleryButton } from "./gallery/GalleryButton";
 import { GenSettingsMenu } from "./GenSettingsMenu";
 import { useGenStore } from "../store/genSettings";
+import { useSettingsStore } from "../store/settings";
+import type { SkillInfo, SkillInputRef } from "../types";
 
 function stem(path: string): string {
   const base = path.split(/[/\\]/).pop() ?? path;
@@ -21,6 +23,13 @@ const IMAGE_EXTS = ["png", "jpg", "jpeg", "webp", "gif", "bmp", "tif", "tiff", "
 
 function sendErrorMessage(e: unknown): string {
   return `Could not send this turn: ${e instanceof Error ? e.message : String(e)}`;
+}
+
+function normalizeSkillSearch(value: string): string {
+  return value
+    .toLowerCase()
+    .replace(/jewellery/g, "jewelry")
+    .replace(/[\s_/:-]+/g, "");
 }
 
 /**
@@ -38,13 +47,23 @@ function sendErrorMessage(e: unknown): string {
  */
 export function Composer() {
   const editorRef = useRef<HTMLDivElement>(null);
+  const skillMenuRef = useRef<HTMLDivElement>(null);
+  const slashRange = useRef<Range | null>(null);
   const lastRange = useRef<Range | null>(null);
   const syncing = useRef(false);
+  const skillsReloading = useRef(false);
 
   const sessionStatus = useChatStore((s) => s.sessionStatus);
   const turnStatus = useChatStore((s) => s.turnStatus);
   const boardId = useBoardStore((s) => s.boardId);
+  const provider = useSettingsStore((s) => s.config.provider);
   const [hasContent, setHasContent] = useState(false);
+  const [skills, setSkills] = useState<SkillInfo[]>([]);
+  const [selectedSkills, setSelectedSkills] = useState<SkillInputRef[]>([]);
+  const [skillsOpen, setSkillsOpen] = useState(false);
+  const [skillsError, setSkillsError] = useState<string | null>(null);
+  const [slashQuery, setSlashQuery] = useState<string | null>(null);
+  const [activeSkillIndex, setActiveSkillIndex] = useState(0);
   const t = useT();
 
   const ready = !!boardId && sessionStatus === "ready";
@@ -267,8 +286,188 @@ export function Composer() {
     if (boardId) void useGenStore.getState().load(boardId);
   }, [boardId]);
   useEffect(() => {
-    if (boardId && sessionStatus === "ready") void useGenStore.getState().fetchModels(boardId);
+    if (provider === "codex" && boardId && sessionStatus === "ready") {
+      void useGenStore.getState().fetchModels(boardId);
+    }
+  }, [boardId, provider, sessionStatus]);
+
+  useEffect(() => {
+    let cancelled = false;
+    setSkillsOpen(false);
+    setSelectedSkills([]);
+    setSlashQuery(null);
+    slashRange.current = null;
+    if (!boardId || sessionStatus !== "ready") {
+      setSkills([]);
+      setSkillsError(null);
+      return () => {
+        cancelled = true;
+      };
+    }
+    setSkillsError(null);
+    void ipc
+      .listSkills(boardId)
+      .then((items) => {
+        if (!cancelled) setSkills(items);
+      })
+      .catch((e) => {
+        if (!cancelled) {
+          setSkills([]);
+          setSkillsError(e instanceof Error ? e.message : String(e));
+        }
+      });
+    return () => {
+      cancelled = true;
+    };
   }, [boardId, sessionStatus]);
+
+  useEffect(() => {
+    const onPointerDown = (e: PointerEvent) => {
+      const root = skillMenuRef.current;
+      if (root && !root.contains(e.target as Node)) {
+        setSkillsOpen(false);
+        setSlashQuery(null);
+        slashRange.current = null;
+      }
+    };
+    document.addEventListener("pointerdown", onPointerDown);
+    return () => document.removeEventListener("pointerdown", onPointerDown);
+  }, []);
+
+  const skillLabel = (skill: SkillInputRef): string => {
+    const full = skills.find((s) => s.name === skill.name && s.path === skill.path);
+    return full?.displayName || full?.name || skill.name;
+  };
+
+  const toggleSkill = (skill: SkillInfo) => {
+    if (!skill.enabled) return;
+    setSelectedSkills((current) => {
+      const exists = current.some((s) => s.name === skill.name && s.path === skill.path);
+      if (exists) return current.filter((s) => !(s.name === skill.name && s.path === skill.path));
+      return [...current, { name: skill.name, path: skill.path }];
+    });
+  };
+
+  const clearSlash = () => {
+    setSlashQuery(null);
+    setActiveSkillIndex(0);
+    slashRange.current = null;
+  };
+
+  const reloadSkills = (forceReload = false) => {
+    if (!boardId || sessionStatus !== "ready" || skillsReloading.current) return;
+    skillsReloading.current = true;
+    setSkillsError(null);
+    void ipc
+      .listSkills(boardId, forceReload)
+      .then((items) => setSkills(items))
+      .catch((e) => {
+        setSkills([]);
+        setSkillsError(e instanceof Error ? e.message : String(e));
+      })
+      .finally(() => {
+        skillsReloading.current = false;
+      });
+  };
+
+  const detectSlash = () => {
+    const editor = editorRef.current;
+    const sel = window.getSelection();
+    if (!editor || !sel || sel.rangeCount === 0 || document.activeElement !== editor) {
+      clearSlash();
+      return;
+    }
+    const range = sel.getRangeAt(0);
+    if (!range.collapsed || !editor.contains(range.startContainer)) {
+      clearSlash();
+      return;
+    }
+    const before = document.createRange();
+    before.selectNodeContents(editor);
+    before.setEnd(range.startContainer, range.startOffset);
+    const match = before.toString().match(/(?:^|\s)\/([^\s/]*)$/);
+    if (!match) {
+      clearSlash();
+      return;
+    }
+    slashRange.current = range.cloneRange();
+    setSlashQuery(match[1].toLowerCase());
+    setSkillsOpen(true);
+    if (skills.length === 0 && !skillsError) reloadSkills(true);
+  };
+
+  const removeSlashToken = () => {
+    const range = slashRange.current;
+    if (!range || range.startContainer.nodeType !== Node.TEXT_NODE) return;
+    const node = range.startContainer;
+    const value = node.textContent ?? "";
+    const before = value.slice(0, range.startOffset);
+    const after = value.slice(range.startOffset);
+    const match = before.match(/(?:^|\s)\/([^\s/]*)$/);
+    if (!match) return;
+    const token = match[0];
+    const keep = /^\s/.test(token) ? token[0] : "";
+    const start = before.length - token.length;
+    node.textContent = before.slice(0, start) + keep + after;
+    const next = document.createRange();
+    next.setStart(node, start + keep.length);
+    next.collapse(true);
+    lastRange.current = next.cloneRange();
+    setCaret(next);
+  };
+
+  const chooseSkill = (skill: SkillInfo) => {
+    if (!skill.enabled) return;
+    if (slashQuery !== null) removeSlashToken();
+    setSelectedSkills((current) => {
+      const exists = current.some((s) => s.name === skill.name && s.path === skill.path);
+      if (exists) return current;
+      return [...current, { name: skill.name, path: skill.path }];
+    });
+    setSkillsOpen(false);
+    clearSlash();
+    refreshHasContent();
+  };
+
+  const removeSkill = (skill: SkillInputRef) => {
+    setSelectedSkills((current) => current.filter((s) => !(s.name === skill.name && s.path === skill.path)));
+  };
+
+  const visibleSkills =
+    slashQuery === null
+      ? skills
+      : skills
+          .map((skill) => {
+            const query = normalizeSkillSearch(slashQuery);
+            const name = normalizeSkillSearch(skill.name);
+            const display = normalizeSkillSearch(skill.displayName ?? "");
+            const short = normalizeSkillSearch(skill.shortDescription ?? "");
+            const description = normalizeSkillSearch(skill.description);
+            let score = 6;
+            if (name === query || display === query) score = 0;
+            else if (name.startsWith(query) || display.startsWith(query)) score = 1;
+            else if (name.includes(query) || display.includes(query)) score = 2;
+            else if (short.startsWith(query)) score = 3;
+            else if (short.includes(query)) score = 4;
+            else if (description.includes(query)) score = 5;
+            return { skill, score };
+          })
+          .filter(({ score }) => score < 6)
+          .sort((a, b) => {
+            const al = (a.skill.displayName || a.skill.name).toLowerCase();
+            const bl = (b.skill.displayName || b.skill.name).toLowerCase();
+            return a.score - b.score || al.localeCompare(bl) || a.skill.path.localeCompare(b.skill.path);
+          })
+          .map(({ skill }) => skill);
+  const selectableSkills = visibleSkills.filter((skill) => skill.enabled);
+  const activeSkill =
+    slashQuery === null || selectableSkills.length === 0
+      ? null
+      : selectableSkills[Math.min(activeSkillIndex, selectableSkills.length - 1)];
+
+  useEffect(() => {
+    setActiveSkillIndex(0);
+  }, [slashQuery, visibleSkills.length]);
 
   // ── dispatch ───────────────────────────────────────────────────────────
   const extract = (): { text: string; refs: string[] } => {
@@ -314,13 +513,19 @@ export function Composer() {
     // Mark notes go at the START of the message (formatted), then the free text.
     const notes = buildMarkNotes(allRefs);
     const instruction = [notes, text].filter((s) => s.trim()).join("\n\n");
-    if (!instruction.trim() && allRefs.length === 0) return;
-    const turn = useChatStore.getState().startTurn(instruction, allRefs);
+    const skillsForTurn = selectedSkills;
+    if (!instruction.trim() && allRefs.length === 0 && skillsForTurn.length === 0) return;
+    const skillLine = skillsForTurn.length
+      ? t("composer.skillsLine", { names: skillsForTurn.map(skillLabel).join(", ") })
+      : "";
+    const visibleInstruction = [instruction, skillLine].filter((s) => s.trim()).join("\n\n");
+    const turn = useChatStore.getState().startTurn(visibleInstruction, allRefs);
     clearEditor();
     void (async () => {
       try {
         const overlays = await buildOverlays(boardId, allRefs);
-        await ipc.sendMessage(boardId, instruction, allRefs, overlays);
+        await ipc.sendMessage(boardId, instruction, allRefs, overlays, skillsForTurn);
+        setSelectedSkills([]);
         // Consume marks only after the turn was actually sent (not on failure).
         useBoardStore.getState().consumeMarks(allRefs);
       } catch (e) {
@@ -344,8 +549,10 @@ export function Composer() {
   const placeholder = ready
     ? t("composer.placeholder")
     : sessionStatus === "starting"
-      ? t("composer.starting")
-      : t("composer.notReady");
+      ? t(provider === "api" ? "composer.startingApi" : "composer.starting")
+      : t(provider === "api" ? "composer.notReadyApi" : "composer.notReady");
+
+  const canSend = ready && (hasContent || selectedSkills.length > 0);
 
   // External → Composer one-shot injections (Gallery prompt OR chat
   // inline-image pill). Watching `nonce` (not the payloads themselves) makes
@@ -416,14 +623,43 @@ export function Composer() {
           suppressContentEditableWarning
           onMouseDown={onEditorMouseDown}
           onFocus={commitGhosts}
-          onInput={refreshHasContent}
+          onInput={() => {
+            refreshHasContent();
+            window.requestAnimationFrame(detectSlash);
+          }}
           onPaste={onPaste}
           onKeyDown={(e) => {
+            if (slashQuery !== null && skillsOpen) {
+              if (e.key === "Escape") {
+                e.preventDefault();
+                setSkillsOpen(false);
+                clearSlash();
+                return;
+              }
+              if (e.key === "ArrowDown" && selectableSkills.length > 0) {
+                e.preventDefault();
+                setActiveSkillIndex((i) => (i + 1) % selectableSkills.length);
+                return;
+              }
+              if (e.key === "ArrowUp" && selectableSkills.length > 0) {
+                e.preventDefault();
+                setActiveSkillIndex((i) => (i - 1 + selectableSkills.length) % selectableSkills.length);
+                return;
+              }
+              if (e.key === "Enter" || e.key === "Tab") {
+                if (activeSkill) {
+                  e.preventDefault();
+                  chooseSkill(activeSkill);
+                  return;
+                }
+              }
+            }
             if (e.key === "Enter" && !e.shiftKey) {
               e.preventDefault();
               dispatch();
             }
           }}
+          onKeyUp={detectSlash}
         />
         <div className="cm-composer__bar">
           <button
@@ -435,14 +671,77 @@ export function Composer() {
           >
             <ImagePlus size={17} />
           </button>
+          <div className="cm-skillpick" ref={skillMenuRef}>
+            <button
+              className={`cm-composer__add cm-skillpick__button${selectedSkills.length ? " cm-skillpick__button--active" : ""}`}
+              data-tip={t("composer.skills")}
+              aria-label={t("composer.skills")}
+              aria-expanded={skillsOpen}
+              disabled={!ready}
+              onClick={() => {
+                clearSlash();
+                if (skills.length === 0 && !skillsError) reloadSkills(true);
+                setSkillsOpen((v) => !v);
+              }}
+            >
+              <Sparkles size={16} />
+            </button>
+            {skillsOpen && (
+              <div className="cm-skillpick__menu" role="menu">
+                {slashQuery !== null && <div className="cm-skillpick__query">/{slashQuery}</div>}
+                {skillsError ? (
+                  <div className="cm-skillpick__empty">{t("composer.skillsError")}</div>
+                ) : visibleSkills.length === 0 ? (
+                  <div className="cm-skillpick__empty">{t("composer.skillsEmpty")}</div>
+                ) : (
+                  visibleSkills.map((skill) => {
+                    const selected = selectedSkills.some((s) => s.name === skill.name && s.path === skill.path);
+                    const active =
+                      activeSkill !== null && activeSkill.name === skill.name && activeSkill.path === skill.path;
+                    const label = skill.displayName || skill.name;
+                    const desc = skill.shortDescription || skill.description;
+                    return (
+                      <button
+                        key={`${skill.name}:${skill.path}`}
+                        className={`cm-skillpick__item${selected ? " cm-skillpick__item--selected" : ""}${active ? " cm-skillpick__item--active" : ""}`}
+                        disabled={!skill.enabled}
+                        role="menuitemcheckbox"
+                        aria-checked={selected}
+                        onMouseDown={(e) => e.preventDefault()}
+                        onClick={() => (slashQuery === null ? toggleSkill(skill) : chooseSkill(skill))}
+                      >
+                        <span className="cm-skillpick__name">{label}</span>
+                        {desc && <span className="cm-skillpick__desc">{desc}</span>}
+                      </button>
+                    );
+                  })
+                )}
+              </div>
+            )}
+          </div>
+          {selectedSkills.length > 0 && (
+            <div className="cm-skillchips">
+              {selectedSkills.map((skill) => (
+                <button
+                  key={`${skill.name}:${skill.path}`}
+                  className="cm-skillchip"
+                  title={skillLabel(skill)}
+                  onClick={() => removeSkill(skill)}
+                >
+                  <span>{skillLabel(skill)}</span>
+                  <X size={12} />
+                </button>
+              ))}
+            </div>
+          )}
           <div className="cm-composer__barspacer" />
-          <GenSettingsMenu />
+          {provider === "codex" && <GenSettingsMenu />}
           {running ? (
             <button className="cm-send cm-send--stop" title={t("composer.stop")} onClick={stop}>
               <Square size={12} fill="currentColor" strokeWidth={0} />
             </button>
           ) : (
-            <button className="cm-send" title={t("composer.send")} onClick={() => dispatch()} disabled={!ready || !hasContent}>
+            <button className="cm-send" title={t("composer.send")} onClick={() => dispatch()} disabled={!canSend}>
               <ArrowUp size={18} />
             </button>
           )}

@@ -350,7 +350,7 @@ fn parse_auth_status(res: &Value) -> CodexAuthStatus {
 fn is_supported_auth_method(method: Option<&str>) -> bool {
     matches!(
         method,
-        Some("chatgpt" | "chatgptAuthTokens" | "agentIdentity")
+        Some("chatgpt" | "chatgptAuthTokens" | "agentIdentity" | "apikey")
     )
 }
 
@@ -1247,6 +1247,25 @@ pub struct ModelInfo {
     pub default_service_tier: Option<String>,
 }
 
+#[derive(Debug, Clone, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SkillInputRef {
+    pub name: String,
+    pub path: String,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SkillInfo {
+    pub name: String,
+    pub path: String,
+    pub description: String,
+    pub enabled: bool,
+    pub scope: String,
+    pub display_name: Option<String>,
+    pub short_description: Option<String>,
+}
+
 fn parse_model(m: &Value) -> Option<ModelInfo> {
     let id = m
         .get("id")
@@ -1336,6 +1355,382 @@ pub async fn list_models(
     Ok(out)
 }
 
+fn parse_skill(s: &Value) -> Option<SkillInfo> {
+    let interface = s.get("interface");
+    Some(SkillInfo {
+        name: s.get("name")?.as_str()?.to_string(),
+        path: s.get("path")?.as_str()?.to_string(),
+        description: s
+            .get("description")
+            .and_then(|v| v.as_str())
+            .unwrap_or_default()
+            .to_string(),
+        enabled: s.get("enabled").and_then(|v| v.as_bool()).unwrap_or(true),
+        scope: s
+            .get("scope")
+            .and_then(|v| v.as_str())
+            .unwrap_or_default()
+            .to_string(),
+        display_name: interface
+            .and_then(|i| i.get("displayName"))
+            .and_then(|v| v.as_str())
+            .map(String::from),
+        short_description: interface
+            .and_then(|i| i.get("shortDescription"))
+            .and_then(|v| v.as_str())
+            .or_else(|| s.get("shortDescription").and_then(|v| v.as_str()))
+            .map(String::from),
+    })
+}
+
+/// Enumerate native Codex Skills for the Board's working directory.
+pub async fn list_skills(
+    codex_reg: Arc<CodexRegistry>,
+    board_id: String,
+    force_reload: bool,
+) -> Result<Vec<SkillInfo>, String> {
+    let session = codex_reg.get(&board_id).ok_or("session not started")?;
+    let inner = &session.inner;
+    let res = inner
+        .call(
+            "skills/list",
+            json!({
+                "cwds": [inner.folder.to_string_lossy()],
+                "forceReload": force_reload,
+            }),
+            15_000,
+        )
+        .await?;
+    Ok(parse_skills_response(&res))
+}
+
+pub async fn list_skills_for_folder(
+    folder: PathBuf,
+    force_reload: bool,
+) -> Result<Vec<SkillInfo>, String> {
+    let codex = match resolve_codex() {
+        Ok(codex) => codex,
+        Err(e) => {
+            tracing::warn!(
+                module = "codex",
+                error = %e,
+                "codex executable not found; scanning local SKILL.md files"
+            );
+            return Ok(list_local_skills());
+        }
+    };
+    let mut cmd = tokio::process::Command::new(&codex.path);
+    crate::process::hide_tokio_console_window(&mut cmd);
+    cmd.arg("app-server")
+        .env("PATH", &codex.search_path)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null());
+    crate::proxy::apply_to_subprocess(&mut cmd, Some(&crate::config::load().proxy));
+    #[cfg(unix)]
+    {
+        cmd.process_group(0);
+    }
+
+    let mut child = match cmd.spawn() {
+        Ok(child) => child,
+        Err(e) => {
+            tracing::warn!(
+                module = "codex",
+                error = %e,
+                "spawn codex app-server for skills/list failed; scanning local SKILL.md files"
+            );
+            return Ok(list_local_skills());
+        }
+    };
+    let pid = child.id().unwrap_or(0);
+    let Some(mut stdin) = child.stdin.take() else {
+        cleanup_probe_child(&mut child, pid).await;
+        tracing::warn!(
+            module = "codex",
+            "codex app-server for skills/list had no stdin; scanning local SKILL.md files"
+        );
+        return Ok(list_local_skills());
+    };
+    let Some(stdout) = child.stdout.take() else {
+        cleanup_probe_child(&mut child, pid).await;
+        tracing::warn!(
+            module = "codex",
+            "codex app-server for skills/list had no stdout; scanning local SKILL.md files"
+        );
+        return Ok(list_local_skills());
+    };
+    let mut lines = BufReader::new(stdout).lines();
+
+    let result: Result<Vec<SkillInfo>, String> = async {
+        probe_call(
+            &mut stdin,
+            &mut lines,
+            1,
+            "initialize",
+            json!({
+                "clientInfo": { "name": "Cameo", "title": null, "version": env!("CARGO_PKG_VERSION") },
+                "capabilities": null
+            }),
+            AUTH_PROBE_INIT_TIMEOUT,
+        )
+        .await?;
+        probe_notify(&mut stdin, "initialized", json!({})).await;
+        let res = probe_call(
+            &mut stdin,
+            &mut lines,
+            2,
+            "skills/list",
+            json!({
+                "cwds": [folder.to_string_lossy()],
+                "forceReload": force_reload,
+            }),
+            Duration::from_secs(15),
+        )
+        .await?;
+        Ok(parse_skills_response(&res))
+    }
+    .await;
+    cleanup_probe_child(&mut child, pid).await;
+    match result {
+        Ok(skills) => Ok(skills),
+        Err(e) => {
+            tracing::warn!(
+                module = "codex",
+                error = %e,
+                "codex skills/list failed; scanning local SKILL.md files"
+            );
+            Ok(list_local_skills())
+        }
+    }
+}
+
+fn parse_skills_response(res: &Value) -> Vec<SkillInfo> {
+    let mut out = Vec::new();
+    if let Some(entries) = res.get("data").and_then(|v| v.as_array()) {
+        for entry in entries {
+            if let Some(skills) = entry.get("skills").and_then(|v| v.as_array()) {
+                out.extend(skills.iter().filter_map(parse_skill));
+            }
+        }
+    }
+    out.sort_by(|a, b| {
+        let an = a.display_name.as_deref().unwrap_or(&a.name).to_lowercase();
+        let bn = b.display_name.as_deref().unwrap_or(&b.name).to_lowercase();
+        an.cmp(&bn).then_with(|| a.path.cmp(&b.path))
+    });
+    out.dedup_by(|a, b| a.name == b.name && a.path == b.path);
+    out
+}
+
+pub fn list_local_skills() -> Vec<SkillInfo> {
+    let mut out = Vec::new();
+    for home in local_skill_homes() {
+        for root in [
+            home.join(".codex").join("skills"),
+            home.join(".agents").join("skills"),
+            home.join(".claude").join("skills"),
+        ] {
+            scan_skill_root(&root, &mut out, 0);
+        }
+    }
+    out.sort_by(|a, b| {
+        let an = a.display_name.as_deref().unwrap_or(&a.name).to_lowercase();
+        let bn = b.display_name.as_deref().unwrap_or(&b.name).to_lowercase();
+        an.cmp(&bn).then_with(|| a.path.cmp(&b.path))
+    });
+    dedup_local_skill_names(&mut out);
+    out.truncate(3_000);
+    tracing::info!(
+        module = "codex",
+        count = out.len(),
+        "local Codex Skills scanned"
+    );
+    out
+}
+
+fn dedup_local_skill_names(skills: &mut Vec<SkillInfo>) {
+    skills.sort_by(|a, b| {
+        canonical_skill_name(a)
+            .cmp(&canonical_skill_name(b))
+            .then_with(|| local_skill_priority(&a.path).cmp(&local_skill_priority(&b.path)))
+            .then_with(|| a.path.cmp(&b.path))
+    });
+    skills.dedup_by(|a, b| canonical_skill_name(a) == canonical_skill_name(b));
+    skills.sort_by(|a, b| {
+        let an = a.display_name.as_deref().unwrap_or(&a.name).to_lowercase();
+        let bn = b.display_name.as_deref().unwrap_or(&b.name).to_lowercase();
+        an.cmp(&bn).then_with(|| a.path.cmp(&b.path))
+    });
+}
+
+fn canonical_skill_name(skill: &SkillInfo) -> String {
+    skill.name.trim().to_ascii_lowercase()
+}
+
+fn local_skill_priority(path: &str) -> u8 {
+    if path.contains("/.codex/skills/") {
+        0
+    } else if path.contains("/.agents/skills/") {
+        1
+    } else if path.contains("/.claude/skills/") {
+        2
+    } else {
+        3
+    }
+}
+
+fn local_skill_homes() -> Vec<PathBuf> {
+    let mut homes = Vec::new();
+    if let Some(home) = dirs::home_dir() {
+        push_unique(&mut homes, home);
+    }
+    if let Some(home) = std::env::var_os("HOME") {
+        push_unique(&mut homes, PathBuf::from(home));
+    }
+    for key in ["USER", "LOGNAME"] {
+        if let Some(user) = std::env::var_os(key).and_then(|v| v.into_string().ok()) {
+            push_unique(&mut homes, PathBuf::from("/Users").join(user));
+        }
+    }
+    #[cfg(target_os = "macos")]
+    if let Ok(entries) = std::fs::read_dir("/Users") {
+        for entry in entries.flatten() {
+            let home = entry.path();
+            if home.join(".codex").join("skills").exists()
+                || home.join(".agents").join("skills").exists()
+                || home.join(".claude").join("skills").exists()
+            {
+                push_unique(&mut homes, home);
+            }
+        }
+    }
+    homes
+}
+
+fn scan_skill_root(root: &Path, out: &mut Vec<SkillInfo>, depth: usize) {
+    if depth > 8 || out.len() >= 3_000 {
+        return;
+    }
+    let Ok(entries) = std::fs::read_dir(root) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.is_dir() {
+            scan_skill_root(&path, out, depth + 1);
+        } else if path.file_name().and_then(|n| n.to_str()) == Some("SKILL.md") {
+            if let Some(skill) = parse_skill_file(&path) {
+                out.push(skill);
+            }
+        }
+        if out.len() >= 3_000 {
+            return;
+        }
+    }
+}
+
+fn parse_skill_file(path: &Path) -> Option<SkillInfo> {
+    let body = std::fs::read_to_string(path).ok()?;
+    let meta = parse_skill_frontmatter(&body);
+    let interface = parse_skill_openai_interface(path);
+    let fallback_name = path
+        .parent()
+        .and_then(|p| p.file_name())
+        .and_then(|n| n.to_str())
+        .unwrap_or("skill")
+        .to_string();
+    let name = meta
+        .get("name")
+        .cloned()
+        .filter(|s| !s.is_empty())
+        .unwrap_or(fallback_name);
+    let description = meta
+        .get("description")
+        .cloned()
+        .or_else(|| meta.get("short_description").cloned())
+        .or_else(|| interface.get("short_description").cloned())
+        .unwrap_or_default();
+    let path_str = path.to_string_lossy().to_string();
+    let scope = if path_str.contains("/.system/") || path_str.contains("/plugins/cache/") {
+        "system"
+    } else {
+        "user"
+    };
+    Some(SkillInfo {
+        name: name.clone(),
+        path: path_str,
+        description: description.clone(),
+        enabled: true,
+        scope: scope.into(),
+        display_name: meta
+            .get("display_name")
+            .cloned()
+            .or_else(|| interface.get("display_name").cloned()),
+        short_description: meta
+            .get("short_description")
+            .cloned()
+            .or_else(|| interface.get("short_description").cloned())
+            .or_else(|| (!description.is_empty()).then_some(description)),
+    })
+}
+
+fn parse_skill_frontmatter(body: &str) -> HashMap<String, String> {
+    let mut out = HashMap::new();
+    let mut lines = body.lines();
+    if lines.next() != Some("---") {
+        return out;
+    }
+    for line in lines {
+        if line.trim() == "---" {
+            break;
+        }
+        let Some((key, value)) = line.split_once(':') else {
+            continue;
+        };
+        let value = value
+            .trim()
+            .trim_matches('"')
+            .trim_matches('\'')
+            .to_string();
+        out.insert(key.trim().to_ascii_lowercase(), value);
+    }
+    out
+}
+
+fn parse_skill_openai_interface(skill_path: &Path) -> HashMap<String, String> {
+    let Some(dir) = skill_path.parent() else {
+        return HashMap::new();
+    };
+    let Ok(body) = std::fs::read_to_string(dir.join("agents").join("openai.yaml")) else {
+        return HashMap::new();
+    };
+    parse_simple_yaml_fields(&body, &["display_name", "short_description", "default_prompt"])
+}
+
+fn parse_simple_yaml_fields(body: &str, wanted: &[&str]) -> HashMap<String, String> {
+    let mut out = HashMap::new();
+    for line in body.lines() {
+        let trimmed = line.trim();
+        let Some((key, value)) = trimmed.split_once(':') else {
+            continue;
+        };
+        let key = key.trim().to_ascii_lowercase();
+        if !wanted.iter().any(|wanted| *wanted == key) {
+            continue;
+        }
+        let value = value
+            .trim()
+            .trim_matches('"')
+            .trim_matches('\'')
+            .to_string();
+        if !value.is_empty() {
+            out.insert(key, value);
+        }
+    }
+    out
+}
+
 /// Read the Board's saved generation knobs (no live session needed).
 pub fn get_gen_settings(folder: &Path) -> crate::model::GenSettings {
     gen_from_meta(&storage::load_meta(folder))
@@ -1369,15 +1764,37 @@ pub fn set_gen_settings(
 // generated images (thinking / tool steps are live-only process detail).
 
 /// Append the user's message to the active session timeline at turn start.
-fn persist_user_record(inner: &CodexSessionInner, text: &str, refs: &[String]) {
+fn persist_user_record(
+    inner: &CodexSessionInner,
+    text: &str,
+    refs: &[String],
+    skills: &[SkillInputRef],
+) {
     let session_id = inner.active_session_id.lock().clone();
     if session_id.is_empty() {
         return;
     }
+    let display_text = if skills.is_empty() {
+        text.to_string()
+    } else {
+        let skill_line = format!(
+            "Skills: {}",
+            skills
+                .iter()
+                .map(|s| s.name.as_str())
+                .collect::<Vec<_>>()
+                .join(", ")
+        );
+        if text.trim().is_empty() {
+            skill_line
+        } else {
+            format!("{text}\n\n{skill_line}")
+        }
+    };
     let msg = json!({
         "id": nanoid::nanoid!(12),
         "role": "user",
-        "text": text,
+        "text": display_text,
         "refs": refs,
     });
     session::append_message(&inner.folder, &session_id, &msg);
@@ -1559,6 +1976,7 @@ pub async fn send_message(
     text: String,
     source_placement_ids: Vec<String>,
     overlays: Vec<(String, String)>,
+    skills: Vec<SkillInputRef>,
 ) -> Result<(), String> {
     let session = codex_reg.get(&board_id).ok_or("session not started")?;
     let inner = &session.inner;
@@ -1580,13 +1998,15 @@ pub async fn send_message(
         }
     };
     let prompt = build_turn_prompt(&text, &refs);
-    let input = json!([{ "type": "text", "text": prompt, "text_elements": [] }]);
+    let input = build_turn_input(&prompt, &skills);
 
     // Authoritatively persist the user message to the active session timeline at
     // submit time (covers both a fresh turn and a steered input). `text` is the
     // original instruction (not the agent-only reference preamble); refs are the
-    // referenced placement ids — same shape the frontend renders.
-    persist_user_record(inner, &text, &source_placement_ids);
+    // referenced placement ids — same shape the frontend renders. Skill names
+    // are persisted for chat history display only; the native skill inputs stay
+    // separate in `input[]`.
+    persist_user_record(inner, &text, &source_placement_ids, &skills);
 
     let active_turn_id = { inner.current_turn_id.lock().clone() };
     if let Some(turn_id) = active_turn_id {
@@ -1681,6 +2101,18 @@ pub async fn send_message(
     tracing::info!(module = "codex", refs = refs.len(), "turn/start ok");
     flush_pending_steers(inner).await;
     Ok(())
+}
+
+fn build_turn_input(prompt: &str, skills: &[SkillInputRef]) -> Value {
+    let mut input = vec![json!({ "type": "text", "text": prompt, "text_elements": [] })];
+    for skill in skills {
+        input.push(json!({
+            "type": "skill",
+            "name": skill.name,
+            "path": skill.path,
+        }));
+    }
+    Value::Array(input)
 }
 
 fn build_turn_prompt(text: &str, refs: &[(String, Option<String>)]) -> String {
@@ -2626,7 +3058,7 @@ mod tests {
     }
 
     #[test]
-    fn auth_status_rejects_api_key_for_cameo() {
+    fn auth_status_accepts_api_key_for_codex_runtime() {
         let auth = parse_auth_status(&json!({
             "authMethod": "apikey",
             "authToken": null,
@@ -2635,7 +3067,7 @@ mod tests {
 
         assert_eq!(auth.auth_method.as_deref(), Some("apikey"));
         assert!(!auth.requires_login);
-        assert!(!auth.auth_supported);
+        assert!(auth.auth_supported);
     }
 
     #[test]

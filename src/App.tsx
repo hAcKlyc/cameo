@@ -47,7 +47,9 @@ function isCodexSetupError(e: unknown) {
   return (
     msg.includes("codex is installed but not logged in") ||
     msg.includes("cameo requires codex signed in") ||
-    msg.includes("codex not found in augmented path")
+    msg.includes("codex not found in augmented path") ||
+    msg.includes("api base url is required") ||
+    msg.includes("api image model is required")
   );
 }
 
@@ -319,6 +321,9 @@ export default function App() {
     chat.reset();
     void (async () => {
       try {
+        const settings = useSettingsStore.getState();
+        if (!settings.loaded) await settings.load();
+        if (!isCurrentStart()) return;
         // Timeline history is Board/Session state, not Codex process state.
         // Load it before starting the sidecar so a Codex startup failure does
         // not blank the chat panel.

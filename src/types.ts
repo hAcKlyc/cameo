@@ -109,7 +109,18 @@ export interface ProxySettings {
   port: number;
 }
 
+export type RuntimeProvider = "codex" | "api";
+
+export interface ApiImageSettings {
+  base_url: string;
+  api_key: string;
+  model: string;
+  size: string;
+}
+
 export interface AppConfig {
+  provider: RuntimeProvider;
+  api: ApiImageSettings;
   proxy: ProxySettings;
   /** Disable anonymous usage telemetry (default false = telemetry enabled). */
   telemetry_opt_out: boolean;
@@ -220,4 +231,17 @@ export interface ModelInfo {
   supportedEfforts: string[];
   serviceTiers: ServiceTierInfo[];
   defaultServiceTier: string | null;
+}
+
+export interface SkillInputRef {
+  name: string;
+  path: string;
+}
+
+export interface SkillInfo extends SkillInputRef {
+  description: string;
+  enabled: boolean;
+  scope: "user" | "repo" | "system" | "admin" | string;
+  displayName: string | null;
+  shortDescription: string | null;
 }

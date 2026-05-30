@@ -1,6 +1,7 @@
 //! Tauri commands for the spatial core. The Board's `BoardDoc` lives in the
 //! registry (single authority); these mutate it under lock and persist.
 
+use crate::api_runtime::{self, ApiRegistry};
 use crate::board::{self, BoardEntry, BoardRegistry};
 use crate::codex::{self, CodexRegistry};
 use crate::model::{
@@ -970,17 +971,26 @@ fn unique_export_dest(dest_dir: &Path, src: &Path, reserved: &mut HashSet<PathBu
     unreachable!("unbounded export filename search")
 }
 
-// ── Codex runtime commands (Phase 3) ─────────────────────────────────────────
+// ── AI runtime commands (Codex/API) ──────────────────────────────────────────
 
-/// Spawn (or reuse) the Codex app-server session for a Board. Returns threadId.
+/// Spawn (or reuse) the configured runtime session for a Board.
 #[tauri::command]
 pub async fn start_session(
     app: AppHandle,
     board_id: String,
     boards: State<'_, Arc<BoardRegistry>>,
     codex: State<'_, Arc<CodexRegistry>>,
+    api: State<'_, Arc<ApiRegistry>>,
 ) -> Result<String, String> {
-    codex::start_session(app, boards.inner().clone(), codex.inner().clone(), board_id).await
+    match crate::config::load().provider {
+        crate::config::RuntimeProvider::Codex => {
+            codex::start_session(app, boards.inner().clone(), codex.inner().clone(), board_id).await
+        }
+        crate::config::RuntimeProvider::Api => {
+            api_runtime::start_session(app, boards.inner().clone(), api.inner().clone(), board_id)
+                .await
+        }
+    }
 }
 
 #[derive(Deserialize)]
@@ -990,22 +1000,31 @@ pub struct OverlayRef {
     pub path: String,
 }
 
-/// Send a turn. `sources` = referenced Placement ids (their files are named in
-/// the prompt for the agent to read — decision D4). `overlays` pairs a source
-/// with its rendered marking-overlay file path (decision D2).
+/// Send a turn. `sources` = referenced Placement ids. `overlays` pairs a
+/// source with its rendered marking-overlay file path (decision D2).
 #[tauri::command]
 pub async fn send_message(
     board_id: String,
     text: String,
     sources: Vec<String>,
     overlays: Vec<OverlayRef>,
+    skills: Vec<codex::SkillInputRef>,
     codex: State<'_, Arc<CodexRegistry>>,
+    api: State<'_, Arc<ApiRegistry>>,
 ) -> Result<(), String> {
     let ov = overlays
         .into_iter()
         .map(|o| (o.placement_id, o.path))
         .collect();
-    codex::send_message(codex.inner().clone(), board_id, text, sources, ov).await
+    match crate::config::load().provider {
+        crate::config::RuntimeProvider::Codex => {
+            codex::send_message(codex.inner().clone(), board_id, text, sources, ov, skills).await
+        }
+        crate::config::RuntimeProvider::Api => {
+            api_runtime::send_message(api.inner().clone(), board_id, text, sources, ov, skills)
+                .await
+        }
+    }
 }
 
 /// Read the Board's saved generation knobs (model/effort/serviceTier). Works
@@ -1033,13 +1052,41 @@ pub fn set_gen_settings(
     Ok(())
 }
 
-/// Enumerate selectable models for the composer menu (via Codex `model/list`).
+/// Enumerate selectable models for the active runtime.
 #[tauri::command]
 pub async fn list_models(
     board_id: String,
     codex: State<'_, Arc<CodexRegistry>>,
+    _api: State<'_, Arc<ApiRegistry>>,
 ) -> Result<Vec<codex::ModelInfo>, String> {
-    codex::list_models(codex.inner().clone(), board_id).await
+    match crate::config::load().provider {
+        crate::config::RuntimeProvider::Codex => {
+            codex::list_models(codex.inner().clone(), board_id).await
+        }
+        crate::config::RuntimeProvider::Api => Ok(api_runtime::list_models()),
+    }
+}
+
+/// Enumerate native Codex Skills for the active Board.
+#[tauri::command]
+pub async fn list_skills(
+    board_id: String,
+    force_reload: bool,
+    registry: State<'_, Arc<BoardRegistry>>,
+    codex: State<'_, Arc<CodexRegistry>>,
+) -> Result<Vec<codex::SkillInfo>, String> {
+    match crate::config::load().provider {
+        crate::config::RuntimeProvider::Api => return Ok(codex::list_local_skills()),
+        crate::config::RuntimeProvider::Codex => {
+            if let Ok(skills) =
+                codex::list_skills(codex.inner().clone(), board_id.clone(), force_reload).await
+            {
+                return Ok(skills);
+            }
+            let folder = registry.folder(&board_id).ok_or("unknown board")?;
+            codex::list_skills_for_folder(folder, force_reload).await
+        }
+    }
 }
 
 /// Replace the annotation shapes for a Placement (empty clears it). Persisted.
@@ -1177,8 +1224,16 @@ pub fn write_overlay(
 pub async fn interrupt_turn(
     board_id: String,
     codex: State<'_, Arc<CodexRegistry>>,
+    api: State<'_, Arc<ApiRegistry>>,
 ) -> Result<(), String> {
-    codex::interrupt_turn(codex.inner().clone(), board_id).await
+    match crate::config::load().provider {
+        crate::config::RuntimeProvider::Codex => {
+            codex::interrupt_turn(codex.inner().clone(), board_id).await
+        }
+        crate::config::RuntimeProvider::Api => {
+            api_runtime::interrupt_turn(api.inner().clone(), board_id).await
+        }
+    }
 }
 
 #[tauri::command]
@@ -1203,8 +1258,10 @@ pub async fn codex_auth_status(
 pub async fn stop_session(
     board_id: String,
     codex: State<'_, Arc<CodexRegistry>>,
+    api: State<'_, Arc<ApiRegistry>>,
 ) -> Result<(), String> {
     codex::stop_session(codex.inner().clone(), &board_id).await;
+    api_runtime::stop_session(api.inner().clone(), &board_id).await;
     Ok(())
 }
 
@@ -1220,13 +1277,21 @@ pub fn list_sessions(
     Ok(session::load(&folder))
 }
 
-/// Start a fresh conversation (new thread); returns its session id.
+/// Start a fresh conversation/session; returns its session id.
 #[tauri::command]
 pub async fn new_session(
     board_id: String,
     codex: State<'_, Arc<CodexRegistry>>,
+    api: State<'_, Arc<ApiRegistry>>,
 ) -> Result<String, String> {
-    codex::new_session(codex.inner().clone(), board_id).await
+    match crate::config::load().provider {
+        crate::config::RuntimeProvider::Codex => {
+            codex::new_session(codex.inner().clone(), board_id).await
+        }
+        crate::config::RuntimeProvider::Api => {
+            api_runtime::new_session(api.inner().clone(), board_id)
+        }
+    }
 }
 
 #[tauri::command]
@@ -1234,8 +1299,16 @@ pub async fn switch_session(
     board_id: String,
     session_id: String,
     codex: State<'_, Arc<CodexRegistry>>,
+    api: State<'_, Arc<ApiRegistry>>,
 ) -> Result<(), String> {
-    codex::switch_session(codex.inner().clone(), board_id, session_id).await
+    match crate::config::load().provider {
+        crate::config::RuntimeProvider::Codex => {
+            codex::switch_session(codex.inner().clone(), board_id, session_id).await
+        }
+        crate::config::RuntimeProvider::Api => {
+            api_runtime::switch_session(api.inner().clone(), board_id, session_id)
+        }
+    }
 }
 
 #[tauri::command]

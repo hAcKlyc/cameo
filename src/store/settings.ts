@@ -1,7 +1,7 @@
 import { create } from "zustand";
 import { ipc } from "../lib/ipc";
 import { useBoardStore } from "./board";
-import type { AppConfig, ProxySettings } from "../types";
+import type { ApiImageSettings, AppConfig, ProxySettings, RuntimeProvider } from "../types";
 
 const DEFAULT_PROXY: ProxySettings = {
   enabled: false,
@@ -10,8 +10,17 @@ const DEFAULT_PROXY: ProxySettings = {
   port: 7897,
 };
 
+const DEFAULT_API: ApiImageSettings = {
+  base_url: "https://api.openai.com/v1",
+  api_key: "",
+  model: "gpt-image-1",
+  size: "1024x1024",
+};
+
 function defaultConfig(): AppConfig {
   return {
+    provider: "codex",
+    api: { ...DEFAULT_API },
     proxy: { ...DEFAULT_PROXY },
     telemetry_opt_out: false,
     last_telemetry_date: null,
@@ -22,14 +31,30 @@ function defaultConfig(): AppConfig {
 const sameProxy = (a: ProxySettings, b: ProxySettings) =>
   a.enabled === b.enabled && a.protocol === b.protocol && a.host === b.host && a.port === b.port;
 
+const sameRuntime = (a: Pick<AppConfig, "provider" | "api">, b: Pick<AppConfig, "provider" | "api">) =>
+  a.provider === b.provider &&
+  a.api.base_url === b.api.base_url &&
+  a.api.api_key === b.api.api_key &&
+  a.api.model === b.api.model &&
+  a.api.size === b.api.size;
+
 const proxyProtocol = (value: unknown): ProxySettings["protocol"] =>
   value === "socks5" ? "socks5" : "http";
+
+const provider = (value: unknown): RuntimeProvider => (value === "api" ? "api" : "codex");
+
+const runtimeSnapshot = (config: AppConfig): Pick<AppConfig, "provider" | "api"> => ({
+  provider: config.provider,
+  api: { ...config.api },
+});
 
 interface SettingsState {
   config: AppConfig;
   loaded: boolean;
   /** Last proxy state persisted + applied to the sidecar — used to skip no-op restarts. */
   applied: ProxySettings;
+  /** Last runtime settings persisted + applied to the active session. */
+  appliedRuntime: Pick<AppConfig, "provider" | "api">;
   /** Transient: a commit is persisting + restarting the session (inline feedback). */
   applying: boolean;
   /** Bumped after a commit so the active Codex session restarts (the proxy is
@@ -37,6 +62,12 @@ interface SettingsState {
   restartNonce: number;
 
   load: () => Promise<void>;
+  /** Switch between local Codex and direct API runtime. Persists + restarts. */
+  setProvider: (provider: RuntimeProvider) => Promise<void>;
+  /** Edit API controls in-memory. Call commitRuntime on blur/change commit. */
+  setApi: (patch: Partial<ApiImageSettings>) => void;
+  /** Persist runtime settings and restart the active session when needed. */
+  commitRuntime: () => Promise<void>;
   /** Edit the in-memory proxy (controlled inputs). Does not persist or restart. */
   setProxy: (patch: Partial<ProxySettings>) => void;
   /** Persist the current proxy and restart the active session so it takes effect.
@@ -55,6 +86,7 @@ export const useSettingsStore = create<SettingsState>((set, get) => ({
   config: defaultConfig(),
   loaded: false,
   applied: { ...DEFAULT_PROXY },
+  appliedRuntime: runtimeSnapshot(defaultConfig()),
   applying: false,
   restartNonce: 0,
 
@@ -62,15 +94,49 @@ export const useSettingsStore = create<SettingsState>((set, get) => ({
     try {
       const cfg = await ipc.cfgLoad();
       const rawProxy = cfg?.proxy;
+      const rawApi = cfg?.api;
       const merged: AppConfig = {
+        provider: provider(cfg?.provider),
+        api: { ...DEFAULT_API, ...rawApi },
         proxy: { ...DEFAULT_PROXY, ...rawProxy, protocol: proxyProtocol(rawProxy?.protocol) },
         telemetry_opt_out: !!cfg?.telemetry_opt_out,
         last_telemetry_date: cfg?.last_telemetry_date ?? null,
         close_to_tray: cfg?.close_to_tray ?? true,
       };
-      set({ config: merged, applied: { ...merged.proxy }, loaded: true });
+      set({
+        config: merged,
+        applied: { ...merged.proxy },
+        appliedRuntime: runtimeSnapshot(merged),
+        loaded: true,
+      });
     } catch {
       set({ loaded: true });
+    }
+  },
+
+  setProvider: async (nextProvider) => {
+    set((s) => ({ config: { ...s.config, provider: nextProvider } }));
+    await get().commitRuntime();
+  },
+
+  setApi: (patch) =>
+    set((s) => ({ config: { ...s.config, api: { ...s.config.api, ...patch } } })),
+
+  commitRuntime: async () => {
+    const { config, appliedRuntime } = get();
+    const nextRuntime = runtimeSnapshot(config);
+    if (sameRuntime(nextRuntime, appliedRuntime)) return;
+    set({ applying: true });
+    try {
+      await ipc.cfgSave(config);
+      const boardId = useBoardStore.getState().boardId;
+      if (boardId) await ipc.stopSession(boardId);
+      set((s) => ({
+        appliedRuntime: runtimeSnapshot(config),
+        restartNonce: s.restartNonce + 1,
+      }));
+    } finally {
+      set({ applying: false });
     }
   },
 
