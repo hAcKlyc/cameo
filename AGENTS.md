@@ -18,8 +18,10 @@
 - **仓库**：https://github.com/hAcKlyc/cameo · 主分支 `main` · 协议 **AGPL-3.0**。
 - **状态**：**v1 已实现并以 0.1.0 开源发布**。打包跨 macOS（Apple Silicon + Intel）+ Windows；
   设计系统浅色 + 红色（DESIGN.md v1.0.0）已全面落地；Codex sidecar 运行时 + 多会话 + 标注
-  overlay + 血缘 + 限流面板 + Gallery + 自动更新 + 托盘都在线。Codex CLI 用用户自己已登录的
-  那份，Cameo 不打包、不卖 token。
+  overlay + 血缘 + 限流面板 + Gallery + 自动更新 + 托盘都在线。输入框带生成档位选择器（模型 /
+  智能 effort / 速度 service tier，每轮 `turn/start` 显式下发）；消息时间线由 Rust runtime 权威
+  落盘；产品所有对外网络（cloud / gallery / 埋点）与 Codex 一致统一走 Settings 代理。Codex CLI
+  用用户自己已登录的那份，Cameo 不打包、不卖 token。
 - **运行**：`pnpm install && pnpm tauri dev`（需要 `codex login` 过的 Codex CLI）。完整下载 /
   打包步骤见 [`README.md`](./README.md)。
 
@@ -30,9 +32,13 @@
 1. **本文件** —— 现状 + 决策 + 工作纪律。
 2. [`specs/ARCHITECTURE.md`](./specs/ARCHITECTURE.md) —— **系统架构真相源**：模块边界、IPC、
    Codex 运行时、存储布局、构建 + 发布。日常迭代以这份为准。
-3. [`specs/DESIGN.md`](./specs/DESIGN.md) —— **视觉真相源**：design token / 字体 / 组件状态
+3. [`specs/CODEX_PROTOCOL.md`](./specs/CODEX_PROTOCOL.md) —— **Codex 协议真相源**：app-server
+   JSON-RPC 方法、生成档位参数语义（model/effort/serviceTier/summary/personality 的 sticky +
+   null 清除）、model/list 字段（wire camelCase vs cache snake_case）、事件流、图像 I/O。动
+   runtime / 加 Codex 参数前必读，别凭记忆。
+4. [`specs/DESIGN.md`](./specs/DESIGN.md) —— **视觉真相源**：design token / 字体 / 组件状态
    矩阵 / 画布交互色。新组件请遵守。
-4. [`README.md`](./README.md) —— 给开源仓库访问者的入口（quick start、平台、FAQ）。
+5. [`README.md`](./README.md) —— 给开源仓库访问者的入口（quick start、平台、FAQ）。
 
 > 本地 maintainer 文档（**已 gitignore，开源仓库里不存在**）：`specs/prd/`（早期 PRD、决策
 > 日志）、`specs/research/`（调研笔记 + Codex runtime file:line 索引）。clone 出去的仓库读
@@ -40,6 +46,8 @@
 >
 > **冲突优先级**：本 AGENTS.md > ARCHITECTURE.md（实现细节） > DESIGN.md（视觉）。三份之间
 > 真有冲突要么 ARCHITECTURE / DESIGN 该更新了，要么本文档该更新了 —— 不要硬编码 fallback。
+> Codex 协议层面的事实（方法名 / 参数语义 / 枚举）以 CODEX_PROTOCOL.md 为准，且最终真相是本机
+> `codex app-server generate-json-schema` 生成的 schema —— 与之冲突说明文档过期，重生成核对。
 
 ---
 
@@ -95,6 +103,9 @@
 | 引用 | v1 走文件路径，agent 自读，不挂传图 |
 | 鉴权 | `~/.codex` ChatGPT 订阅，**无 API key** |
 | 云 | 编译期开关（`VITE_CAMEO_API_*`），开源 fork 默认无云 |
+| 生成档位 | model/effort/serviceTier 每轮 `turn/start` 显式下发 + per-Board 持久化（不回落用户 config.toml）；summary=auto / personality=friendly 固定默认 |
+| 时间线落盘 | **Rust runtime 权威写入** `.cameo/sessions/<id>.jsonl`（绑定 turn 的 session、不依赖前端聚焦），前端不再 best-effort append |
+| 网络代理 | 产品**所有**对外出口（Codex sidecar + cloud + gallery 图片 + 更新）统一走 `net::client` / env，不只是 agent |
 | 协议 | AGPL-3.0 |
 
 ### 有人（包括未来的 AI）提议以下，请先 push back

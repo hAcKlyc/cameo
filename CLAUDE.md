@@ -18,8 +18,10 @@
 - **仓库**：https://github.com/hAcKlyc/cameo · 主分支 `main` · 协议 **AGPL-3.0**。
 - **状态**：**v1 已实现并以 0.1.0 开源发布**。打包跨 macOS（Apple Silicon + Intel）+ Windows；
   设计系统浅色 + 红色（DESIGN.md v1.0.0）已全面落地；Codex sidecar 运行时 + 多会话 + 标注
-  overlay + 血缘 + 限流面板 + Gallery + 自动更新 + 托盘都在线。Codex CLI 用用户自己已登录的
-  那份，Cameo 不打包、不卖 token。
+  overlay + 血缘 + 限流面板 + Gallery + 自动更新 + 托盘都在线。输入框带生成档位选择器（模型 /
+  智能 effort / 速度 service tier，每轮 `turn/start` 显式下发）；消息时间线由 Rust runtime 权威
+  落盘；产品所有对外网络（cloud / gallery / 埋点）与 Codex 一致统一走 Settings 代理。Codex CLI
+  用用户自己已登录的那份，Cameo 不打包、不卖 token。
 - **运行**：`pnpm install && pnpm tauri dev`（需要 `codex login` 过的 Codex CLI）。完整下载 /
   打包步骤见 [`README.md`](./README.md)。
 
@@ -101,6 +103,9 @@
 | 引用 | v1 走文件路径，agent 自读，不挂传图 |
 | 鉴权 | `~/.codex` ChatGPT 订阅，**无 API key** |
 | 云 | 编译期开关（`VITE_CAMEO_API_*`），开源 fork 默认无云 |
+| 生成档位 | model/effort/serviceTier 每轮 `turn/start` 显式下发 + per-Board 持久化（不回落用户 config.toml）；summary=auto / personality=friendly 固定默认 |
+| 时间线落盘 | **Rust runtime 权威写入** `.cameo/sessions/<id>.jsonl`（绑定 turn 的 session、不依赖前端聚焦），前端不再 best-effort append |
+| 网络代理 | 产品**所有**对外出口（Codex sidecar + cloud + gallery 图片 + 更新）统一走 `net::client` / env，不只是 agent |
 | 协议 | AGPL-3.0 |
 
 ### 有人（包括未来的 AI）提议以下，请先 push back

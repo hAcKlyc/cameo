@@ -3,6 +3,33 @@
 User-facing release notes for Cameo. This file describes what changed from a
 user's point of view, rather than listing internal implementation details.
 
+## [0.1.6] - 2026-05-30
+
+### Improvements
+
+- A new **Codex setup panel** makes getting started clearer: Cameo tells you
+  whether the Codex CLI is installed and signed in, and gives one-tap guidance
+  (install / `codex login`) with a re-check button when something's missing.
+- You can now choose how Codex generates right from the input box — pick the
+  **model**, the **intelligence** (reasoning effort: low / medium / high / extra
+  high), and the **speed** (standard or fast), mirroring the official Codex app.
+  Your choice is remembered per board.
+- Image turns feel faster out of the box: Cameo now sends a balanced reasoning
+  setting by default instead of inheriting whatever heavier setting your Codex
+  CLI happened to be configured with.
+- The **network proxy** in Settings now covers *everything* Cameo does — the
+  Gallery (listings and images), usage stats, and update checks — not just the
+  Codex agent. Set it once and all of Cameo's traffic follows it.
+- You can **rename a workspace** from its menu.
+
+### Fixes
+
+- Your chat history is now saved reliably. Replies that finished while you were
+  on another board (or during a flaky connection) could previously go missing
+  from a board's history; the app now records each turn itself as it happens.
+
+---
+
 ## [0.1.3] - 2026-05-29
 
 ### Improvements

@@ -113,9 +113,11 @@ Cameo 是一个**桌面 app**（Tauri 2 + React + PixiJS），把 OpenAI 的 **C
    └───────────────────────────────┘
 ```
 
-- **常规对外网络** = Codex sidecar。WebView 只读本地 Cameo 图片协议，Rust 后端只读写本地文件（+
-  可选 cloud telemetry / gallery，见 §7）。例外：Rust 会做轻量网络诊断 probe：请求 Google 的
-  `generate_204` 连通性检查地址；不携带账号、prompt 或图片内容。
+- **所有对外网络都从 Rust 出**：Codex sidecar（自带网络）+ 一切产品请求经 `net.rs` 的带代理
+  `reqwest` 客户端（cloud telemetry / gallery JSON + 图片，见 §7；自动更新见 `updater.rs`）。
+  WebView 不直接访问外部服务 —— 它只读本地 `cameo://` 图片协议、以及把远程图片经 `cmnet://`
+  转回 Rust。这样 Settings 里的代理对全产品生效（WebView fetch/`<img>` 本身不认 app 代理）。
+  另有一条轻量网络诊断 probe（Google `generate_204` 连通性检查；不带账号 / prompt / 图片内容）。
 - **进程清理纪律**：unix 走 `nix` 进程组 SIGTERM→SIGKILL，win 走 `taskkill /T /F`（`codex.rs`
   里 `kill_tree` 两个 `#[cfg]` 版本）—— 关 app / 换 Board / interrupt turn 都不能留僵尸。
 
@@ -129,22 +131,22 @@ Cameo 是一个**桌面 app**（Tauri 2 + React + PixiJS），把 OpenAI 的 **C
 | 文件 | 行数 | 职责 |
 |---|---:|---|
 | `main.rs` | 5 | 二进制入口，调 `cameo_lib::run()` |
-| `lib.rs` | 171 | **Tauri Builder**：plugin（opener/dialog/notification/updater/process）+ 全局 state（BoardRegistry / CodexRegistry）+ 41 个 command 注册 + Cameo 图片协议 + 窗口关闭→托盘逻辑 |
-| `commands.rs` | 1263 | **IPC 桥**：workspace / board / asset / session / codex / config / device / updater / clipboard 的所有命令实现。前端的每个 `ipc.xxx` 在这里有 1:1 对应 |
+| `lib.rs` | 181 | **Tauri Builder**：plugin（opener/dialog/notification/updater/process）+ 全局 state（BoardRegistry / CodexRegistry）+ ~54 个 command 注册 + 本地图片协议（`cameo://`）+ 代理远程图片协议（`cmnet://`）+ 窗口关闭→托盘逻辑 |
+| `commands.rs` | 1393 | **IPC 桥**：workspace / board / asset / session / codex / 生成档位（gen settings / model 列表）/ cloud 传输 / config / device / updater / clipboard 的所有命令实现。前端的每个 `ipc.xxx` 在这里有 1:1 对应 |
 
 **Board 和文档真相**
 | 文件 | 行数 | 职责 |
 |---|---:|---|
 | `board.rs` | 339 | 内存中的 `BoardRegistry`，每个 Board 一个 entry（folder / doc / 名字）。Board id = blake3(folder)。所有 Placement / Annotation 突变汇集于此 |
-| `model.rs` | 167 | 可序列化类型：`BoardDoc` / `Placement` / `Asset` / `Annotation` / `Shape` |
-| `storage.rs` | 57 | 原子读写 `board.json` / `meta.json`（temp + rename）|
+| `model.rs` | 188 | 可序列化类型：`BoardDoc` / `Placement` / `Asset` / `Annotation` / `Shape` / `BoardMeta`（含 per-Board 生成档位 `gen_model/gen_effort/gen_service_tier`）/ `GenSettings` |
+| `storage.rs` | 57 | 原子读写 `board.json` / `meta.json`（temp + rename），meta 解析失败会 warn（不静默默认化）|
 | `workspace.rs` | 117 | 全局工作区注册表（`~/.cameo/boards.jsonl`）|
-| `session.rs` | 146 | 每个 Board 多会话：`sessions.json`（索引 + threadId）+ `sessions/<id>.jsonl`（append-only 时间线）|
+| `session.rs` | 176 | 每个 Board 多会话：`sessions.json`（索引 + threadId）+ `sessions/<id>.jsonl`（消息时间线）。**时间线由 runtime（codex.rs）权威写入**（见 §5）；append 失败会 warn |
 
 **Codex 集成（详见 §5）**
 | 文件 | 行数 | 职责 |
 |---|---:|---|
-| `codex.rs` | 1044 | **核心**：spawn `codex app-server` → JSON-RPC `initialize` / `thread/start` / `turn/start` + active-turn `turn/steer` → drain items → 转 `UnifiedEvent` |
+| `codex.rs` | 2737 | **核心**：spawn `codex app-server` → JSON-RPC `initialize` / `thread/start` / `turn/start`（显式下发 model/effort/serviceTier/summary/personality）+ active-turn `turn/steer` → drain items → 转 `UnifiedEvent`。还负责 `model/list`、per-Board 生成档位、以及**消息时间线权威落盘**（user 记录在 turn 开始、assistant 在 turn 结束写入 active session）。协议细节见 [`CODEX_PROTOCOL.md`](./CODEX_PROTOCOL.md) |
 | `process.rs` | 31 | 子进程小工具；Windows 下给 Codex / taskkill 等 console 子进程加 `CREATE_NO_WINDOW` |
 | `runtime.rs` | 89 | runtime-agnostic 事件枚举：`UnifiedEvent`（SessionInit / TextDelta / Thinking* / Tool* / GenerationStarted / ImageGenerated / TurnComplete / RateLimits / …）|
 | `prompt.rs` | 32 | 系统提示 + 引用图块格式 |
@@ -153,14 +155,15 @@ Cameo 是一个**桌面 app**（Tauri 2 + React + PixiJS），把 OpenAI 的 **C
 | 文件 | 行数 | 职责 |
 |---|---:|---|
 | `assets.rs` | 184 | Asset 内容寻址（blake3）+ 缩略图生成（image crate → JPEG）|
-| `protocol.rs` | 82 | Cameo 图片协议 URI 处理：从 BoardRegistry 路由到磁盘文件，兼容 Windows WebView2 `http://cameo.localhost/...` 形态，做路径规范化 / 防穿越 |
+| `protocol.rs` | 248 | 两个 URI scheme：`cameo://`（本地 Board 图片，路由到磁盘 + 防穿越）和 `cmnet://`（**代理远程图片** —— 经 `net.rs` 拉取，SSRF 白名单只允许 public https）。均兼容 Windows WebView2 `http://<scheme>.localhost/...` 形态 |
 | `paths.rs` | 100 | 文件系统布局：全局 `~/.cameo/` + 每 Board `.cameo/`，`CAMEO_HOME` 可覆盖（测试/便携）|
 
 **系统服务**
 | 文件 | 行数 | 职责 |
 |---|---:|---|
 | `config.rs` | 61 | `AppConfig`（proxy / close_to_tray / telemetry_opt_out / last_telemetry_date）+ `~/.cameo/config.json` 原子 IO |
-| `proxy.rs` | 819 | HTTP/SOCKS5 代理注入 —— 给 Codex sidecar spawn 时的 env 设 `HTTP(S)_PROXY` / `ALL_PROXY` / `NO_PROXY`；同时提供 Settings / AI 面板的轻量网络诊断 probe（WebView 只读本地 Cameo 图片协议）|
+| `proxy.rs` | 819 | `ProxySettings` + HTTP/SOCKS5 代理注入 —— 给 Codex sidecar spawn 时的 env 设 `HTTP(S)_PROXY` / `ALL_PROXY` / `NO_PROXY`；同时提供 Settings / AI 面板的轻量网络诊断 probe |
+| `net.rs` | 59 | **产品所有对外网络出口的唯一带代理客户端**（cloud API / gallery 远程图片）。按 `ProxySettings` 构建一个缓存的 `reqwest::Client`、代理变更时重建。WebView 的 `fetch`/`<img>` 不认 app 代理，故一切需走代理的请求都经此（pit of success：新功能联网用它就自动继承代理）|
 | `logging.rs` | 56 | `tracing` 双 sink：stderr + 日滚文件（`~/.cameo/logs/cameo.YYYY-MM-DD.log`，保留 14 天）。Rust / 前端 `front_log` / Codex stderr 全部带 `module=` 标签汇在一处 |
 | `device.rs` | 94 | 匿名 device id（UUID v4 持久化到 `~/.cameo/device_id`），cloud telemetry 的锚 |
 | `tray.rs` | 68 | 系统托盘图标 + 菜单。关窗口默认隐藏到托盘（设置可关）；macOS dock reopen 处理 |
@@ -244,8 +247,12 @@ TS 侧镜像于 `src/types.ts::CodexEvent`（serde camelCase wire form）。
 - Agent 状态面板会做本机 setup/auth 探测：先找 Codex CLI，再用 `codex app-server`
   的 `getAuthStatus` 检查是否需要 `codex login`。探测只返回 auth method / 是否需要登录，
   **不请求 token、不读取 token**；真正运行中的账号切换 / token 刷新仍由 Codex sidecar 自己处理。
-- 代理仅注入 Codex sidecar 的 env；保存设置后**自动重启当前 session**（`settings.restartNonce`
-  → `App.tsx` 的会话 effect 依赖它）让新代理生效。
+- **代理覆盖产品所有对外网络出口**，不止 Codex：
+  - **Codex sidecar** —— spawn 时注入 `HTTP(S)_PROXY`/`ALL_PROXY`/`NO_PROXY` env（`proxy.rs`）。保存设置后**自动重启当前 session**（`settings.restartNonce` → `App.tsx` 会话 effect）让新代理生效。
+  - **cloud API（gallery + telemetry）** —— 前端 `cloudFetch` 不再用 WebView `fetch`，改走 `cloud_request` 命令 → `net.rs` 的带代理 `reqwest` 客户端（见 §7）。
+  - **gallery 远程图片** —— `<img>` 经 `cmnet://` scheme → `net.rs` 代理拉取（`proxiedImg()` 包装）。
+  - **自动更新** —— `updater.rs::build_updater_with_proxy` 把代理应用到 updater 的 reqwest builder。
+  - 设计理由：WebView 自己的 `fetch`/`<img>` 只认系统代理、不认 app 内代理，所以一切需走代理的请求都下沉到 Rust 的 `net::client`（唯一出口，pit of success）。
 - 代理开关开启且 host / port 有效时，Settings 会触发 `proxy.rs::probe_connectivity`：先连本地
   代理端口，再按所选协议访问 `http://connectivitycheck.gstatic.com/generate_204`，预期 HTTP 204。
   结果只用于设置面板的文字反馈，帮助用户发现端口、协议、认证或代理节点问题；不参与 agent 语义。
@@ -277,6 +284,7 @@ TS 侧镜像于 `src/types.ts::CodexEvent`（serde camelCase wire form）。
 | `store/chat.ts` | 681 | 消息时间线 + Codex 事件 handler + streaming phrases + watchdog；多会话切换；rate-limit |
 | `store/ui.ts` | 72 | 画布 stats / 面板可见性 / mark 工具状态 / 选中 / 上下文菜单 |
 | `store/composer.ts` | 39 | 输入草稿 + 引用 pill |
+| `store/genSettings.ts` | 130 | per-Board 生成档位（模型 / 智能 effort / 速度 service tier）；`model/list` 缓存 + 切模型时 clamp effort/tier + 失效模型兜底；改动经 `ipc.setGenSettings` 持久化（Rust 落 meta.json 并推到 live session）|
 | `store/history.ts` | 49 | undo / redo 时间线 |
 | `store/settings.ts` | 122 | proxy / close-to-tray / telemetry opt-out / 更新 nonce |
 | `store/workspace.ts` | 74 | 最近工作区 / 当前激活 / sidebar 可见 |
@@ -298,8 +306,9 @@ TS 侧镜像于 `src/types.ts::CodexEvent`（serde camelCase wire form）。
 
 ### 6.4 组件（按区域）
 
-- **聊天**：`ChatPanel.tsx` / `ChatInlineImage.tsx` / `Composer.tsx` / `StreamingStatus.tsx` ——
-  消息列表、流式指示器、composer 栏；inline image 检测（markdown / link / plain path）+ 右键
+- **聊天**：`ChatPanel.tsx` / `ChatInlineImage.tsx` / `Composer.tsx` / `GenSettingsMenu.tsx` /
+  `StreamingStatus.tsx` —— 消息列表、流式指示器、composer 栏 + 生成档位选择器（模型 / 智能 /
+  速度，对照官方 Codex app 的输入框菜单）；inline image 检测（markdown / link / plain path）+ 右键
   菜单（复制 / 引用 / 加到画布 / 在 Finder 显示）。
 - **画布 chrome**：`SelectionBar.tsx` / `CropOverlay.tsx` / `CanvasContextMenu.tsx` —— 选中浮动条、
   crop 编辑 UI、右键菜单。
@@ -331,9 +340,12 @@ TS 侧镜像于 `src/types.ts::CodexEvent`（serde camelCase wire form）。
 `src/services/cloud/`
 | 文件 | 职责 |
 |---|---|
-| `index.ts` | `cloudFetch` 包装（带 `X-API-Key` / `X-Device-Id` / `X-App-Version` header）；错误码归一化（401 → unauthorized、403 → banned、429 → quota）|
+| `index.ts` | `cloudFetch` 包装（注入 `X-API-Key` / `X-Device-Id` / `X-App-Version` header + 错误码归一化：401 → unauthorized、403 → banned、429 → quota）。**传输经 `cloud_request` 命令 → Rust `net.rs` 带代理客户端**（不用 WebView `fetch`，以走 Settings 代理）。还导出 `proxiedImg()`：把远程 https 图片 URL 包成 `cmnet://`，让 `<img>` 也走代理 |
 | `telemetry.ts` | 匿名 daily ping（一天一条 `app_open`），UTC 日期去重；用户可在设置里关闭 |
 | `gallery.ts` | Prompt 画廊 API：`GET /api/v1/gallery/items`（列表+详情数据一次给全，点开不需要二跳）、`/facets`、`/random`、`/items/:id`（SEO / 直链）|
+
+> 所有云请求（gallery JSON、telemetry）和 gallery 远程图片都经 Rust 带代理客户端出口（见 §5.4），
+> 与 Codex sidecar 一致地遵守 Settings → 代理。
 
 **Server 端**是一个独立的云服务（Cloudflare Workers + D1 + R2 + KV 实现），不在本仓库范围；开源自建版无需它。
 
@@ -364,9 +376,9 @@ TS 侧镜像于 `src/types.ts::CodexEvent`（serde camelCase wire form）。
 | 路径 | 内容 | 所有者 |
 |---|---|---|
 | `board.json` | `BoardDoc`：Placement[] / Annotation[] / 布局 | `board.rs` + `storage.rs` |
-| `meta.json` | `BoardMeta`：threadId / 显示名 / 设置 | `board.rs` + `storage.rs` |
+| `meta.json` | `BoardMeta`：threadId / 显示名 / active session / **per-Board 生成档位（gen_model/gen_effort/gen_service_tier，additive Option）** | `board.rs` + `storage.rs` |
 | `sessions.json` | active session id + `SessionMeta[]` | `session.rs` |
-| `sessions/<id>.jsonl` | append-only 消息时间线 | `session.rs` |
+| `sessions/<id>.jsonl` | 消息时间线（`ChatMessage` JSON）。**由 runtime（codex.rs）权威写入**，绑定 turn 的 session、不依赖前端聚焦（修复了旧版前端 best-effort 落盘可能静默丢历史的问题）| `codex.rs` 写 / `session.rs` IO |
 | `thumbs/` | blake3-named 缩略图缓存 | `assets.rs` |
 | `tmp/` | dispatch 临时图（clean + overlay）—— 放在 workspace 内是为了让 Codex sandbox 能读 | `codex.rs` |
 

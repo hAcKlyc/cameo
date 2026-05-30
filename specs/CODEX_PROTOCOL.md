@@ -290,9 +290,14 @@ codex app-server generate-json-schema --out <dir>
 - approval=`never` + sandbox=`workspace-write`（Board folder 内编辑的自然默认）。
 - 标记 = overlay-as-image（发图，不依赖结构化 mask API）。
 
-### 进行中
-- `prd_0.1.6_generation_controls.md`：在 `turn/start` 显式下发 model/effort/serviceTier +
-  summary=auto/personality=friendly，并在输入框暴露模型/智能/速度选择器。
+### 已实现（0.1.6）
+- 生成档位选择器（`prd_0.1.6_generation_controls.md`）：`turn/start` 显式下发
+  model/effort/serviceTier + summary=auto/personality=friendly，输入框暴露模型/智能/速度选择器，
+  per-Board 持久化到 meta.json（`store/genSettings.ts` + `codex.rs` `set_gen_settings`）。
+- **消息时间线由 runtime 权威落盘**：`codex.rs` 在 turn 开始写 user 记录、turn 结束写 assistant
+  记录到 active session 的 `.cameo/sessions/<id>.jsonl`，不依赖前端聚焦（修复静默丢历史）。
+- **全产品网络出口统一走代理**：cloud API（`cloud_request` 命令）+ gallery 图片（`cmnet://`
+  scheme）经 `net.rs` 的带代理客户端，与 sidecar 一致遵守 Settings → 代理。
 
 ---
 
