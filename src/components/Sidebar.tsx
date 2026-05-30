@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { Plus, FolderPlus, FolderOpen, MoreHorizontal, Trash2 } from "lucide-react";
+import { Plus, FolderPlus, FolderOpen, MoreHorizontal, Pencil, Trash2 } from "lucide-react";
 import { useWorkspaceStore } from "../store/workspace";
 import { useBoardStore } from "../store/board";
 import { ipc } from "../lib/ipc";
@@ -61,6 +61,15 @@ function WorkspaceRow({ w, active }: { w: WorkspaceEntry; active: boolean }) {
       </button>
       {menu && (
         <div className="cm-ws__menu" onMouseLeave={() => setMenu(false)}>
+          <button
+            onClick={() => {
+              setMenu(false);
+              setEditing(true);
+            }}
+          >
+            <Pencil size={13} />
+            {t("sidebar.rename")}
+          </button>
           <button
             onClick={() => {
               setMenu(false);

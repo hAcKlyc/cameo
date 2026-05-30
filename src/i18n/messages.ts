@@ -42,6 +42,7 @@ export const en = {
   "sidebar.workspaces": "Workspaces",
   "sidebar.empty": "No workspaces yet.",
   "sidebar.more": "More",
+  "sidebar.rename": "Rename",
   "sidebar.openDir": "Open folder",
   "sidebar.remove": "Remove",
 
@@ -254,6 +255,7 @@ export const zh: Record<MsgKey, string> = {
   "sidebar.workspaces": "工作区",
   "sidebar.empty": "还没有工作区。",
   "sidebar.more": "更多",
+  "sidebar.rename": "重命名",
   "sidebar.openDir": "打开所在目录",
   "sidebar.remove": "移除",
 
