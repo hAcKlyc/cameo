@@ -1,11 +1,15 @@
 import { RotateCw, Loader2, TriangleAlert } from "lucide-react";
 import { useT } from "../i18n/locale";
-import { useUpdater } from "../hooks/useUpdater";
+import { useUpdaterStore } from "../store/updater";
 
 /**
  * Topbar "重启更新" button. Renders only when there's a pending update on
  * disk (silent download has completed). One click → graceful Codex sidecar
  * shutdown → install + relaunch.
+ *
+ * Shares state with the Settings → Version section via store/updater.ts, so a
+ * download triggered from Settings lights this button up too. Stays hidden
+ * while a download is still in progress (that progress shows in Settings).
  *
  * Mounted in the topbar to the LEFT of the Settings gear so users see it
  * exactly where they're already looking when they click anything in the
@@ -13,16 +17,20 @@ import { useUpdater } from "../hooks/useUpdater";
  */
 export function UpdateIndicator() {
   const t = useT();
-  const { pendingVersion, installing, error, restart } = useUpdater();
+  const phase = useUpdaterStore((s) => s.phase);
+  const pendingVersion = useUpdaterStore((s) => s.pendingVersion);
+  const error = useUpdaterStore((s) => s.error);
+  const install = useUpdaterStore((s) => s.install);
 
-  if (!pendingVersion) return null;
+  if ((phase !== "ready" && phase !== "installing") || !pendingVersion) return null;
+  const installing = phase === "installing";
 
   return (
     <button
       type="button"
       className={`cm-update-btn${error ? " is-error" : ""}`}
       title={error ? t("update.errorTooltip", { error }) : t("update.tooltip", { version: pendingVersion })}
-      onClick={() => void restart()}
+      onClick={() => void install()}
       disabled={installing}
     >
       {installing ? (

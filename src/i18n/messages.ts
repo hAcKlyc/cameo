@@ -207,6 +207,8 @@ export const en = {
   "settings.resetDevice": "Reset device ID",
   "settings.resetDeviceConfirm": "Reset device ID? The next launch will get a new identity.",
   "settings.resetDeviceDone": "Done — takes effect next launch.",
+  "settings.about": "About",
+  "settings.version": "Version",
 
   // Gallery — prompt inspiration overlay
   "gallery.button": "Gallery",
@@ -237,6 +239,16 @@ export const en = {
   "update.retryButton": "Update failed · Retry",
   "update.tooltip": "Cameo {version} is ready — click to install",
   "update.errorTooltip": "Update install failed: {error}",
+  "update.check": "Check for Updates",
+  "update.checking": "Checking…",
+  "update.downloading": "Downloading {pct}%",
+  "update.downloadingWait": "Downloading…",
+  "update.installing": "Installing…",
+  "update.releaseNotes": "Release Notes",
+  "update.upToDate": "Cameo is up to date.",
+  "update.checkFailed": "Could not check for updates.",
+  "update.installFailed": "Update failed. Please check for updates again.",
+  "update.openFailed": "Couldn't open the browser.",
 } as const;
 
 export type MsgKey = keyof typeof en;
@@ -430,6 +442,8 @@ export const zh: Record<MsgKey, string> = {
   "settings.resetDevice": "重置设备 ID",
   "settings.resetDeviceConfirm": "重置设备 ID？下次启动会换一个新身份。",
   "settings.resetDeviceDone": "已重置 — 下次启动生效。",
+  "settings.about": "关于",
+  "settings.version": "版本",
 
   "gallery.button": "Gallery",
   "gallery.title": "Prompt 灵感库",
@@ -458,6 +472,16 @@ export const zh: Record<MsgKey, string> = {
   "update.retryButton": "更新失败 · 重试",
   "update.tooltip": "Cameo {version} 已准备就绪 — 点击安装",
   "update.errorTooltip": "更新安装失败：{error}",
+  "update.check": "检查更新",
+  "update.checking": "检查中…",
+  "update.downloading": "下载中 {pct}%",
+  "update.downloadingWait": "下载中…",
+  "update.installing": "安装中…",
+  "update.releaseNotes": "更新记录",
+  "update.upToDate": "Cameo 已是最新版本。",
+  "update.checkFailed": "检查更新失败。",
+  "update.installFailed": "更新失败，请重新检查更新。",
+  "update.openFailed": "无法打开浏览器。",
 };
 
 export const messages = { en, zh };

@@ -533,13 +533,16 @@
   --cm-font-mono:    ui-monospace, "SF Mono", Menlo, monospace;
   --cm-weight-regular: 400; --cm-weight-medium: 500; --cm-weight-semibold: 600;
 
-  /* ---- z-index 层级 ---- */
-  --cm-z-canvas:   0;     /* 画布 */
-  --cm-z-chrome:   10;    /* 顶栏 / 侧栏 */
-  --cm-z-floating: 20;    /* HUD / 选择条 / 工具栏 */
-  --cm-z-menu:     1000;  /* dropdown / popover / context menu */
-  --cm-z-tooltip:  1100;
-  --cm-z-modal:    2000;  /* scrim + 模态 / 抽屉 */
-  --cm-z-toast:    3000;
+  /* ---- z-index 层级（真相源在 src/styles/app.css :root；此处同步）----
+     只为「浮在画布之上的系统层」定义 token，升序留空档便于插层。
+     画布内部元素用一个保留的本地 band（1–16，raw 小数字），它们的相互
+     顺序是画布合成细节、不是系统决策，故不进 token 体系：
+       空状态 5 · 图片标题 6 · 工具栏 8 · 顶栏/HUD 10 · 选择条 11 ·
+       裁切/Todo 12 · 标记评论 15 · chat/sidebar 面板 16 */
+  --cm-z-menu:    30;    /* dropdown / popover / tooltip / 右键菜单 / 生成档位菜单 */
+  --cm-z-overlay: 50;    /* 全窗 compare 对比浮层 */
+  --cm-z-modal:   60;    /* 模态 scrim + 弹窗（设置等）*/
+  --cm-z-gallery: 70;    /* Gallery 浮层（detail backdrop +10，其内菜单 +20）*/
+  --cm-z-toast:  100;    /* 应用内 toast — 永远最上层 */
 }
 ```

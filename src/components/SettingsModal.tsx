@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { AlertCircle, CheckCircle2, Loader2, X } from "lucide-react";
 import { useSettingsStore } from "../store/settings";
+import { VersionSection } from "./VersionSection";
 import { useT, useLocaleStore, type LocaleChoice } from "../i18n/locale";
 import { ipc } from "../lib/ipc";
 import type { MsgKey } from "../i18n/messages";
@@ -267,6 +268,8 @@ export function SettingsModal({ onClose }: { onClose: () => void }) {
               </>
             )}
           </section>
+
+          <VersionSection />
         </div>
       </div>
     </div>

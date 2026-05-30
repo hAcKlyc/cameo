@@ -94,10 +94,19 @@
   --cm-weight-medium: 500;
   --cm-weight-semibold: 600;
 
-  /* ── z-index scale ────────────────────────────────────────────────────── */
-  --cm-z-floating: 11;
-  --cm-z-menu: 30;
-  --cm-z-overlay: 50;
+  /* ── z-index scale ── single source of truth; mirror in DESIGN.md §15.
+     Named SYSTEM layers only, ascending with gaps for future insertions.
+     Canvas-internal elements live in a reserved local band (1–16) below
+     --cm-z-menu — empty state, image titles, toolbar, topbar/HUD, selection
+     bar, crop/todo overlays, mark comments, docked chat/sidebar panels — and
+     keep small raw values; their mutual order is a canvas-composition detail,
+     not a system decision. Everything that floats ABOVE the canvas uses a
+     token below. */
+  --cm-z-menu: 30;      /* dropdowns, popovers, tooltips, context menus */
+  --cm-z-overlay: 50;   /* full-window compare overlay */
+  --cm-z-modal: 60;     /* modal scrim + dialog */
+  --cm-z-gallery: 70;   /* gallery overlay (detail backdrop +10, its menu +20) */
+  --cm-z-toast: 100;    /* in-app toasts — always on top */
 }
 
 * {
@@ -311,6 +320,15 @@ body,
 .cm-btn--primary:disabled {
   background: var(--cm-brand-200);
   border-color: var(--cm-brand-200);
+}
+/* Failed-action variant (e.g. an update install that errored → retry). */
+.cm-btn--primary.is-error {
+  background: var(--cm-danger);
+  border-color: var(--cm-danger);
+}
+.cm-btn--primary.is-error:hover {
+  background: var(--cm-danger-strong);
+  border-color: var(--cm-danger-strong);
 }
 
 /* ── Empty state ────────────────────────────────────────────────────────── */
@@ -2165,7 +2183,7 @@ body.cm-chat-resizing {
   border-radius: var(--cm-radius-lg);
   box-shadow: var(--cm-shadow-2);
   backdrop-filter: blur(10px);
-  z-index: var(--cm-z-floating);
+  z-index: 11; /* canvas-area selection bar — local band (< --cm-z-menu) */
   user-select: none;
   white-space: nowrap;
 }
@@ -2599,7 +2617,7 @@ body.cm-chat-resizing {
 .cm-modal-backdrop {
   position: fixed;
   inset: 0;
-  z-index: 60;
+  z-index: var(--cm-z-modal);
   background: var(--cm-scrim);
   backdrop-filter: blur(4px);
   display: grid;
@@ -2730,6 +2748,63 @@ body.cm-chat-resizing {
 }
 .cm-set-hint--err {
   color: var(--cm-danger);
+}
+/* About / Version section. */
+.cm-set-version {
+  font-size: 14px;
+  color: var(--cm-fg);
+  font-variant-numeric: tabular-nums;
+}
+/* Row of update actions (检查更新 / 重启更新 + 更新记录). The first slot is
+   swapped for a progress bar mid-download. */
+.cm-set-update {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 2px;
+}
+/* Inline download progress — occupies the same slot as the check button. */
+.cm-progress {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-width: 220px;
+  padding: 9px 14px;
+  border: 1px solid var(--cm-line);
+  border-radius: var(--cm-radius-md);
+  background: var(--cm-gray-50);
+}
+.cm-progress__track {
+  position: relative;
+  flex: 1;
+  height: 6px;
+  border-radius: var(--cm-radius-pill);
+  background: var(--cm-gray-200);
+  overflow: hidden;
+}
+.cm-progress__fill {
+  position: absolute;
+  inset: 0 auto 0 0;
+  height: 100%;
+  border-radius: var(--cm-radius-pill);
+  background: var(--cm-accent);
+  transition: width 0.2s ease;
+}
+/* Indeterminate: server sent no content-length, so animate a sliding chip
+   instead of freezing a determinate bar at 0%. */
+.cm-progress__fill--indeterminate {
+  width: 40%;
+  animation: cm-progress-slide 1.1s ease-in-out infinite;
+}
+@keyframes cm-progress-slide {
+  0% { transform: translateX(-110%); }
+  100% { transform: translateX(290%); }
+}
+.cm-progress__label {
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+  color: var(--cm-fg-secondary);
+  white-space: nowrap;
 }
 .cm-set-probe {
   display: flex;
@@ -2906,7 +2981,7 @@ body.cm-chat-resizing {
 /* ── Canvas right-click context menu ──────────────────────────────────────── */
 .cm-ctx {
   position: fixed;
-  z-index: 2000;
+  z-index: var(--cm-z-menu);
   min-width: 184px;
   display: flex;
   flex-direction: column;
@@ -3003,7 +3078,7 @@ body.cm-chat-resizing {
   position: absolute;
   right: 0;
   bottom: calc(100% + 6px);
-  z-index: 2000;
+  z-index: var(--cm-z-menu);
   min-width: 196px;
   display: flex;
   flex-direction: column;
@@ -3120,6 +3195,71 @@ body.cm-chat-resizing {
   user-select: text;
 }
 
+/* ───────────────────── In-app toasts ───────────────────── */
+/* Bottom-center stack, above modals. See store/toast.ts + ToastHost.tsx. */
+.cm-toasts {
+  position: fixed;
+  left: 50%;
+  bottom: 24px;
+  transform: translateX(-50%);
+  z-index: var(--cm-z-toast);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 8px;
+  pointer-events: none;
+}
+.cm-toast {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  max-width: 420px;
+  padding: 10px 10px 10px 14px;
+  background: var(--cm-surface);
+  border: 1px solid var(--cm-line);
+  border-radius: var(--cm-radius-lg);
+  box-shadow: var(--cm-shadow-2);
+  font-size: 13px;
+  color: var(--cm-fg);
+  pointer-events: auto;
+  animation: cm-toast-in 0.16s ease;
+}
+@keyframes cm-toast-in {
+  from { opacity: 0; transform: translateY(6px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+.cm-toast__icon {
+  flex: none;
+}
+.cm-toast--success .cm-toast__icon {
+  color: var(--cm-success);
+}
+.cm-toast--error .cm-toast__icon {
+  color: var(--cm-danger);
+}
+.cm-toast--info .cm-toast__icon {
+  color: var(--cm-accent);
+}
+.cm-toast__msg {
+  line-height: 1.4;
+}
+.cm-toast__close {
+  flex: none;
+  display: inline-flex;
+  appearance: none;
+  border: none;
+  background: transparent;
+  color: var(--cm-muted);
+  cursor: pointer;
+  padding: 3px;
+  border-radius: var(--cm-radius-sm);
+  transition: background 0.12s ease, color 0.12s ease;
+}
+.cm-toast__close:hover {
+  color: var(--cm-fg);
+  background: var(--cm-gray-100);
+}
+
 /* ───────────────────── Composer — Gallery entry ───────────────────── */
 .cm-composer__topbar {
   display: flex;
@@ -3158,7 +3298,7 @@ body.cm-chat-resizing {
 .cm-gallery-backdrop {
   position: fixed;
   inset: 0;
-  z-index: 70;
+  z-index: var(--cm-z-gallery);
   background: rgba(245, 245, 247, 0.72);
   backdrop-filter: blur(20px) saturate(1.4);
   -webkit-backdrop-filter: blur(20px) saturate(1.4);
@@ -3270,7 +3410,7 @@ body.cm-chat-resizing {
   min-width: 180px;
   max-height: 60vh;
   overflow-y: auto;
-  z-index: 90;
+  z-index: calc(var(--cm-z-gallery) + 20);
 }
 .cm-gallery__menuitem {
   appearance: none;
@@ -3415,7 +3555,7 @@ body.cm-chat-resizing {
 .cm-gdetail-backdrop {
   position: fixed;
   inset: 0;
-  z-index: 80;
+  z-index: calc(var(--cm-z-gallery) + 10);
   background: rgba(0, 0, 0, 0.45);
   backdrop-filter: blur(2px);
   display: grid;

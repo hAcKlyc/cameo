@@ -206,16 +206,30 @@ pub async fn check_update_on_startup(app: AppHandle) {
 
 // ── silent check + download ─────────────────────────────────────────────────
 //
-// One-shot worker. Returns `Some(version)` if a newer version was downloaded;
-// `None` if up-to-date or already-downloaded-this-session.
-async fn check_and_download_silently(app: &AppHandle) -> Result<Option<String>, String> {
+// One-shot worker. The three outcomes are distinct on purpose: a manual check
+// from Settings must NOT tell the user "you're up to date" when in fact another
+// check/download is already running (Busy) — only when the server genuinely
+// reports nothing newer (UpToDate).
+pub enum CheckOutcome {
+    /// Another check/download already holds the lock — result unknown yet.
+    Busy,
+    /// Server reports no newer version.
+    UpToDate,
+    /// A newer version was downloaded (or already on disk this session).
+    Downloaded(#[allow(dead_code)] String),
+}
+
+async fn check_and_download_silently(app: &AppHandle) -> Result<CheckOutcome, String> {
     if UPDATE_IN_PROGRESS.swap(true, Ordering::SeqCst) {
         tracing::info!(module = "updater", "update already in progress, skipping");
-        return Ok(None);
+        return Ok(CheckOutcome::Busy);
     }
     let result = check_and_download_silently_inner(app).await;
     UPDATE_IN_PROGRESS.store(false, Ordering::SeqCst);
-    result
+    result.map(|opt| match opt {
+        Some(v) => CheckOutcome::Downloaded(v),
+        None => CheckOutcome::UpToDate,
+    })
 }
 
 async fn check_and_download_silently_inner(app: &AppHandle) -> Result<Option<String>, String> {
@@ -367,14 +381,21 @@ struct DownloadProgress {
 
 // ── manual check (settings panel) ──────────────────────────────────────────
 //
-// Same as the startup path but without the 60s delay. Returns whether an update
-// was found and download was attempted (for inline feedback in Settings).
+// Same as the startup path but without the 60s delay. Returns a status the
+// frontend turns into the right feedback:
+//   "found"    — a newer version is downloading / downloaded (show progress /
+//                restart button; no toast).
+//   "busy"     — a background check/download is already running; treated like
+//                "found" so we never falsely toast "up to date".
+//   "uptodate" — server genuinely reports nothing newer (toast "已是最新版本").
 #[tauri::command]
-pub async fn check_and_download_update(app: AppHandle) -> Result<bool, String> {
-    match check_and_download_silently(&app).await? {
-        Some(_) => Ok(true),
-        None => Ok(false),
+pub async fn check_and_download_update(app: AppHandle) -> Result<String, String> {
+    Ok(match check_and_download_silently(&app).await? {
+        CheckOutcome::Downloaded(_) => "found",
+        CheckOutcome::Busy => "busy",
+        CheckOutcome::UpToDate => "uptodate",
     }
+    .to_string())
 }
 
 // ── windows: pending bytes on startup ───────────────────────────────────────

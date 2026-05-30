@@ -23,12 +23,14 @@ import { ChatPanel } from "./components/ChatPanel";
 import { Sidebar } from "./components/Sidebar";
 import { SettingsModal } from "./components/SettingsModal";
 import { UpdateIndicator } from "./components/UpdateIndicator";
+import { ToastHost } from "./components/ToastHost";
 import { useUiStore, MARK_SHAPES, isMarkTool, type MarkShape } from "./store/ui";
 import { useBoardStore } from "./store/board";
 import { useChatStore } from "./store/chat";
 import { useWorkspaceStore } from "./store/workspace";
 import { useHistoryStore } from "./store/history";
 import { useSettingsStore } from "./store/settings";
+import { useUpdaterStore } from "./store/updater";
 import { useT } from "./i18n/locale";
 import type { MsgKey } from "./i18n/messages";
 import { useCodexEvents } from "./lib/useCodexEvents";
@@ -290,6 +292,9 @@ export default function App() {
   useEffect(() => {
     if (didInit.current) return;
     didInit.current = true;
+    // Subscribe to updater lifecycle events (shared by the topbar button and
+    // the Settings → Version section). Idempotent.
+    useUpdaterStore.getState().init();
     void ipc.initialBoard().then((path) => {
       if (path) void useWorkspaceStore.getState().openWorkspace(path);
     });
@@ -395,6 +400,7 @@ export default function App() {
       </div>
       <EmptyState />
       {settingsOpen && <SettingsModal onClose={() => setSettingsOpen(false)} />}
+      <ToastHost />
     </div>
   );
 }

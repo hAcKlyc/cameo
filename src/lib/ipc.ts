@@ -153,6 +153,19 @@ export const ipc = {
   /** Open a directory in the OS file manager. */
   openDir: (path: string) => invoke<void>("open_dir", { path }),
 
+  // ── Auto-updater (manual trigger of the otherwise-silent pipeline) ─────────
+  /** Run the same check+download as the startup path, immediately. Resolves a
+   *  status: "found" (newer version downloading/downloaded), "busy" (a check is
+   *  already running — treat like found), or "uptodate" (nothing newer). Awaits
+   *  the full download; live progress arrives via `updater:*` events. */
+  checkAndDownloadUpdate: () =>
+    invoke<"found" | "busy" | "uptodate">("check_and_download_update"),
+  /** Apply the downloaded update (mac relaunch / win NSIS). Replaces the
+   *  process on success — the returned promise resolves only on failure. */
+  installPendingUpdate: () => invoke<void>("install_pending_update"),
+  /** Windows: a previously-downloaded update on disk, or null. */
+  checkPendingUpdate: () => invoke<string | null>("check_pending_update"),
+
   // ── Chat-text-embedded image references ───────────────────────────────────
   /** Classify a path string the AI emitted in chat text. Returns whether
    *  it's a real image, whether it lives in the current workspace, the
