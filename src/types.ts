@@ -246,6 +246,14 @@ export interface GenSettings {
   serviceTier: string | null;
 }
 
+export type PermissionMode = "workspace" | "fullAccess";
+
+/** Per-Board Codex permission preset. `null` = product default (`workspace`).
+ *  Mirrors Rust `PermissionSettings`. */
+export interface PermissionSettings {
+  mode: PermissionMode | null;
+}
+
 /** A service (speed) tier offered by a model, e.g. `{ id: "priority", name:
  *  "Fast", description: "1.5x speed, increased usage" }`. */
 export interface ServiceTierInfo {

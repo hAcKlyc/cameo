@@ -24,7 +24,7 @@ use std::collections::{HashMap, VecDeque};
 use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 #[cfg(not(windows))]
 use std::sync::OnceLock;
@@ -765,6 +765,14 @@ pub struct CodexSessionInner {
     /// so all dispatch paths (composer / preset / context menu) apply them without
     /// each caller having to thread params through. See CODEX_PROTOCOL.md §4.
     gen: PlMutex<crate::model::GenSettings>,
+    /// Per-Board permission preset. Seeded from meta, updated by
+    /// `set_permission_settings`, and read on EVERY `turn/start` so the thread's
+    /// sticky sandbox/approval settings match the input-box menu.
+    permission: PlMutex<crate::model::PermissionSettings>,
+    /// Set when the live permission preset changes after a thread has already
+    /// been started/resumed. The next fresh turn first re-resumes the active
+    /// thread so legacy `sandbox` and structured `sandboxPolicy` stay aligned.
+    permission_thread_dirty: AtomicBool,
     /// Assistant chat blocks accumulated during the in-flight turn, in arrival
     /// order (text segments + generated images). Flushed to the active session's
     /// timeline at turn end. This makes the message timeline AUTHORITATIVELY
@@ -1020,6 +1028,7 @@ pub async fn start_session(
         return Err("no stderr".into());
     };
 
+    let meta_for_settings = storage::load_meta(&folder);
     let inner = Arc::new(CodexSessionInner {
         app,
         registry: board_reg,
@@ -1040,7 +1049,9 @@ pub async fn start_session(
         agent_accum: PlMutex::new(HashMap::new()),
         pending_gen: PlMutex::new(HashMap::new()),
         intentional_shutdown: PlMutex::new(false),
-        gen: PlMutex::new(gen_from_meta(&storage::load_meta(&folder))),
+        gen: PlMutex::new(gen_from_meta(&meta_for_settings)),
+        permission: PlMutex::new(permission_from_meta(&meta_for_settings)),
+        permission_thread_dirty: AtomicBool::new(false),
         turn_blocks: PlMutex::new(Vec::new()),
     });
 
@@ -1133,7 +1144,9 @@ async fn ensure_thread(
     prev: Option<String>,
 ) -> Result<String, String> {
     let dev = prompt::build_developer_instructions();
-    let (approval, sandbox) = ("never", "workspace-write");
+    let approval = "never";
+    let permission = inner.permission.lock().clone();
+    let sandbox = sandbox_mode_for_thread(&permission);
     let id = if let Some(prev) = prev {
         match inner
             .call(
@@ -1220,10 +1233,63 @@ fn new_thread_params(folder: &Path, approval: &str, sandbox: &str, dev: &str) ->
     })
 }
 
+async fn sync_thread_permission_if_dirty(
+    inner: &Arc<CodexSessionInner>,
+    session_id: &str,
+    thread_id: String,
+) -> Result<(String, crate::model::PermissionSettings), String> {
+    let permission = inner.permission.lock().clone();
+    if !inner.permission_thread_dirty.swap(false, Ordering::SeqCst) {
+        return Ok((thread_id, permission));
+    }
+
+    let dev = prompt::build_developer_instructions();
+    let approval = "never";
+    let sandbox = sandbox_mode_for_thread(&permission);
+    let resolved = match inner
+        .call(
+            "thread/resume",
+            json!({ "threadId": thread_id.clone(), "model": null, "approvalPolicy": approval, "sandbox": sandbox, "developerInstructions": dev }),
+            30_000,
+        )
+        .await
+    {
+        Ok(res) => thread_id_of(&res).unwrap_or(thread_id),
+        Err(e) if is_stale_thread(&e) => {
+            tracing::warn!(module = "codex", "stale thread during permission sync; starting fresh: {e}");
+            let res = inner
+                .call(
+                    "thread/start",
+                    new_thread_params(&inner.folder, approval, sandbox, &dev),
+                    30_000,
+                )
+                .await
+                .map_err(|start_err| {
+                    inner.permission_thread_dirty.store(true, Ordering::SeqCst);
+                    start_err
+                })?;
+            thread_id_of(&res).ok_or_else(|| {
+                inner.permission_thread_dirty.store(true, Ordering::SeqCst);
+                "thread/start: no thread id".to_string()
+            })?
+        }
+        Err(e) => {
+            inner.permission_thread_dirty.store(true, Ordering::SeqCst);
+            return Err(e);
+        }
+    };
+
+    session::set_thread(&inner.folder, session_id, &resolved);
+    *inner.thread_id.lock() = resolved.clone();
+    Ok((resolved, permission))
+}
+
 /// Product defaults for generation knobs when the Board has no saved choice.
 /// `serviceTier` has no default constant — `None` is sent as JSON null (standard).
 pub const DEFAULT_GEN_MODEL: &str = "gpt-5.5";
 pub const DEFAULT_GEN_EFFORT: &str = "medium";
+pub const PERMISSION_MODE_WORKSPACE: &str = "workspace";
+pub const PERMISSION_MODE_FULL_ACCESS: &str = "fullAccess";
 
 fn gen_from_meta(m: &crate::model::BoardMeta) -> crate::model::GenSettings {
     crate::model::GenSettings {
@@ -1231,6 +1297,59 @@ fn gen_from_meta(m: &crate::model::BoardMeta) -> crate::model::GenSettings {
         effort: m.gen_effort.clone(),
         service_tier: m.gen_service_tier.clone(),
     }
+}
+
+fn clean_permission_mode(mode: Option<&str>) -> Option<&'static str> {
+    match mode {
+        Some(PERMISSION_MODE_WORKSPACE) => Some(PERMISSION_MODE_WORKSPACE),
+        Some(PERMISSION_MODE_FULL_ACCESS) => Some(PERMISSION_MODE_FULL_ACCESS),
+        _ => None,
+    }
+}
+
+fn permission_from_meta(m: &crate::model::BoardMeta) -> crate::model::PermissionSettings {
+    crate::model::PermissionSettings {
+        mode: clean_permission_mode(m.permission_mode.as_deref()).map(String::from),
+    }
+}
+
+fn resolved_permission_mode(settings: &crate::model::PermissionSettings) -> &'static str {
+    clean_permission_mode(settings.mode.as_deref()).unwrap_or(PERMISSION_MODE_WORKSPACE)
+}
+
+fn sandbox_mode_for_thread(settings: &crate::model::PermissionSettings) -> &'static str {
+    match resolved_permission_mode(settings) {
+        PERMISSION_MODE_FULL_ACCESS => "danger-full-access",
+        _ => "workspace-write",
+    }
+}
+
+fn sandbox_policy_for_turn(settings: &crate::model::PermissionSettings) -> Value {
+    match resolved_permission_mode(settings) {
+        PERMISSION_MODE_FULL_ACCESS => json!({ "type": "dangerFullAccess" }),
+        _ => json!({ "type": "workspaceWrite" }),
+    }
+}
+
+fn turn_start_params(
+    thread_id: &str,
+    input: Value,
+    model: String,
+    effort: String,
+    service_tier: Option<String>,
+    permission: &crate::model::PermissionSettings,
+) -> Value {
+    json!({
+        "threadId": thread_id,
+        "input": input,
+        "summary": "auto",
+        "personality": "friendly",
+        "model": model,
+        "effort": effort,
+        "serviceTier": service_tier,
+        "approvalPolicy": "never",
+        "sandboxPolicy": sandbox_policy_for_turn(permission),
+    })
 }
 
 /// A model from `model/list`, projected to what the composer menu needs. Field
@@ -1451,6 +1570,35 @@ pub fn set_gen_settings(
     storage::save_meta(folder, &meta);
     if let Some(session) = codex_reg.get(board_id) {
         *session.inner.gen.lock() = settings;
+    }
+}
+
+/// Read the Board's saved Codex permission preset (no live session needed).
+pub fn get_permission_settings(folder: &Path) -> crate::model::PermissionSettings {
+    permission_from_meta(&storage::load_meta(folder))
+}
+
+/// Persist the Board's permission preset and push it onto the live session (if
+/// any). Unknown values are treated as the product default (`workspace`) rather
+/// than being forwarded into Codex.
+pub fn set_permission_settings(
+    codex_reg: &Arc<CodexRegistry>,
+    folder: &Path,
+    board_id: &str,
+    settings: crate::model::PermissionSettings,
+) {
+    let sanitized = crate::model::PermissionSettings {
+        mode: clean_permission_mode(settings.mode.as_deref()).map(String::from),
+    };
+    let mut meta = storage::load_meta(folder);
+    meta.permission_mode = sanitized.mode.clone();
+    storage::save_meta(folder, &meta);
+    if let Some(session) = codex_reg.get(board_id) {
+        *session.inner.permission.lock() = sanitized;
+        session
+            .inner
+            .permission_thread_dirty
+            .store(true, Ordering::SeqCst);
     }
 }
 
@@ -1677,7 +1825,7 @@ pub async fn send_message(
     let overlay_map: HashMap<String, String> = overlays.into_iter().collect();
     let new_overlays: Vec<String> = overlay_map.values().cloned().collect();
 
-    let thread_id = inner.thread_id.lock().clone();
+    let mut thread_id = inner.thread_id.lock().clone();
     if thread_id.is_empty() {
         cleanup_overlay_paths(&inner.folder, new_overlays);
         return Err("session has no thread yet".into());
@@ -1766,19 +1914,23 @@ pub async fn send_message(
     let model = gen.model.unwrap_or_else(|| DEFAULT_GEN_MODEL.to_string());
     let effort = gen.effort.unwrap_or_else(|| DEFAULT_GEN_EFFORT.to_string());
     let service_tier = gen.service_tier; // None → JSON null → standard tier
+    let active_session_id = inner.active_session_id.lock().clone();
+    let (synced_thread_id, permission) =
+        match sync_thread_permission_if_dirty(inner, &active_session_id, thread_id).await {
+            Ok(pair) => pair,
+            Err(e) => {
+                clear_active_turn(inner);
+                clear_stream_state(inner);
+                cleanup_dispatch_overlays(inner);
+                return Err(e);
+            }
+    };
+    thread_id = synced_thread_id;
 
     let res = match inner
         .call(
             "turn/start",
-            json!({
-                "threadId": thread_id,
-                "input": input,
-                "summary": "auto",
-                "personality": "friendly",
-                "model": model,
-                "effort": effort,
-                "serviceTier": service_tier,
-            }),
+            turn_start_params(&thread_id, input, model, effort, service_tier, &permission),
             15_000,
         )
         .await
@@ -2760,7 +2912,8 @@ async fn on_image_generation(inner: &Arc<CodexSessionInner>, item: &Value) {
 
 async fn handle_server_request(inner: &Arc<CodexSessionInner>, id: u64, method: &str) {
     // With approvalPolicy=never these are rare. Surface it, then auto-accept so
-    // the turn never hangs (the workspace-write sandbox bounds the risk).
+    // the turn never hangs. Future interactive approval modes must replace this
+    // behavior before they are exposed in UI.
     inner.emit(UnifiedEvent::PermissionRequest {
         request_id: id,
         summary: method.to_string(),
@@ -2868,6 +3021,111 @@ mod tests {
             &json!({ "jsonrpc": "2.0", "id": 8, "result": {} }),
             7,
         ));
+    }
+
+    #[test]
+    fn permission_defaults_to_workspace_codex_sandbox() {
+        let settings = crate::model::PermissionSettings::default();
+
+        assert_eq!(
+            resolved_permission_mode(&settings),
+            PERMISSION_MODE_WORKSPACE
+        );
+        assert_eq!(sandbox_mode_for_thread(&settings), "workspace-write");
+        assert_eq!(
+            sandbox_policy_for_turn(&settings),
+            json!({ "type": "workspaceWrite" })
+        );
+    }
+
+    #[test]
+    fn permission_maps_full_access_to_danger_full_access() {
+        let settings = crate::model::PermissionSettings {
+            mode: Some(PERMISSION_MODE_FULL_ACCESS.to_string()),
+        };
+
+        assert_eq!(
+            resolved_permission_mode(&settings),
+            PERMISSION_MODE_FULL_ACCESS
+        );
+        assert_eq!(sandbox_mode_for_thread(&settings), "danger-full-access");
+        assert_eq!(
+            sandbox_policy_for_turn(&settings),
+            json!({ "type": "dangerFullAccess" })
+        );
+    }
+
+    #[test]
+    fn permission_rejects_unknown_modes() {
+        let settings = crate::model::PermissionSettings {
+            mode: Some("read-only".to_string()),
+        };
+
+        assert_eq!(
+            resolved_permission_mode(&settings),
+            PERMISSION_MODE_WORKSPACE
+        );
+        assert_eq!(sandbox_mode_for_thread(&settings), "workspace-write");
+        assert_eq!(
+            sandbox_policy_for_turn(&settings),
+            json!({ "type": "workspaceWrite" })
+        );
+    }
+
+    #[test]
+    fn turn_start_params_include_permission_policy() {
+        let workspace = crate::model::PermissionSettings {
+            mode: Some(PERMISSION_MODE_WORKSPACE.to_string()),
+        };
+        let full_access = crate::model::PermissionSettings {
+            mode: Some(PERMISSION_MODE_FULL_ACCESS.to_string()),
+        };
+
+        let base_input = json!([{ "type": "text", "text": "hi" }]);
+        let workspace_params = turn_start_params(
+            "thread-1",
+            base_input.clone(),
+            DEFAULT_GEN_MODEL.to_string(),
+            DEFAULT_GEN_EFFORT.to_string(),
+            None,
+            &workspace,
+        );
+        let full_access_params = turn_start_params(
+            "thread-1",
+            base_input,
+            DEFAULT_GEN_MODEL.to_string(),
+            DEFAULT_GEN_EFFORT.to_string(),
+            Some("priority".to_string()),
+            &full_access,
+        );
+
+        assert_eq!(
+            workspace_params
+                .get("approvalPolicy")
+                .and_then(Value::as_str),
+            Some("never")
+        );
+        assert_eq!(
+            workspace_params
+                .get("sandboxPolicy")
+                .and_then(|v| v.get("type"))
+                .and_then(Value::as_str),
+            Some("workspaceWrite")
+        );
+        assert!(workspace_params.get("serviceTier").is_some_and(Value::is_null));
+        assert_eq!(
+            full_access_params
+                .get("sandboxPolicy")
+                .and_then(|v| v.get("type"))
+                .and_then(Value::as_str),
+            Some("dangerFullAccess")
+        );
+        assert_eq!(
+            full_access_params
+                .get("serviceTier")
+                .and_then(Value::as_str),
+            Some("priority")
+        );
     }
 
     #[test]

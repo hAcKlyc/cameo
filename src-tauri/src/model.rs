@@ -185,6 +185,11 @@ pub struct BoardMeta {
     pub gen_effort: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub gen_service_tier: Option<String>,
+    /// Per-Board Codex permission mode (v0.1.9). `None` loads as the product
+    /// default ("workspace"). This is a UI-level mode; the runtime maps it to
+    /// Codex approval/sandbox fields on thread/start and turn/start.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub permission_mode: Option<String>,
 }
 
 /// The user's generation knobs for a Board, crossing the IPC boundary and held
@@ -196,6 +201,15 @@ pub struct GenSettings {
     pub model: Option<String>,
     pub effort: Option<String>,
     pub service_tier: Option<String>,
+}
+
+/// The Board's Codex permission preset. `mode == None` means the product
+/// default ("workspace"); the only persisted concrete values are "workspace"
+/// and "fullAccess".
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PermissionSettings {
+    pub mode: Option<String>,
 }
 
 /// Returned to the frontend when a Board is opened.

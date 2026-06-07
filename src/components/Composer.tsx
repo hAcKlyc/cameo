@@ -11,6 +11,7 @@ import { buildOverlays, buildMarkNotes, annotatedImages } from "../lib/overlay";
 import { GalleryButton } from "./gallery/GalleryButton";
 import { GenSettingsMenu } from "./GenSettingsMenu";
 import { useGenStore } from "../store/genSettings";
+import { usePermissionStore } from "../store/permissionSettings";
 import type { CodexSkillInfo, CodexSkillRef } from "../types";
 
 function stem(path: string): string {
@@ -609,10 +610,12 @@ export function Composer() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  // Generation knobs: load the Board's saved choice on board change; fetch the
-  // model list once the session is ready (model/list needs a live app-server).
+  // Input-box settings: load the Board's saved choices on board change; fetch
+  // the model list once the session is ready (model/list needs a live app-server).
   useEffect(() => {
-    if (boardId) void useGenStore.getState().load(boardId);
+    if (!boardId) return;
+    void useGenStore.getState().load(boardId);
+    void usePermissionStore.getState().load(boardId);
   }, [boardId]);
   useEffect(() => {
     if (boardId && sessionStatus === "ready") void useGenStore.getState().fetchModels(boardId);

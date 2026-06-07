@@ -132,13 +132,13 @@ Cameo 是一个**桌面 app**（Tauri 2 + React + PixiJS），把 OpenAI 的 **C
 |---|---:|---|
 | `main.rs` | 5 | 二进制入口，调 `cameo_lib::run()` |
 | `lib.rs` | 181 | **Tauri Builder**：plugin（opener/dialog/notification/updater/process）+ 全局 state（BoardRegistry / CodexRegistry）+ ~54 个 command 注册 + 本地图片协议（`cameo://`）+ 代理远程图片协议（`cmnet://`）+ 窗口关闭→托盘逻辑 |
-| `commands.rs` | 1393 | **IPC 桥**：workspace / board / asset / session / codex / 生成档位（gen settings / model 列表）/ cloud 传输 / config / device / updater / clipboard 的所有命令实现。前端的每个 `ipc.xxx` 在这里有 1:1 对应 |
+| `commands.rs` | 1393 | **IPC 桥**：workspace / board / asset / session / codex / 输入框设置（生成档位 / 权限 / model 列表）/ cloud 传输 / config / device / updater / clipboard 的所有命令实现。前端的每个 `ipc.xxx` 在这里有 1:1 对应 |
 
 **Board 和文档真相**
 | 文件 | 行数 | 职责 |
 |---|---:|---|
 | `board.rs` | 339 | 内存中的 `BoardRegistry`，每个 Board 一个 entry（folder / doc / 名字）。Board id = blake3(folder)。所有 Placement / Annotation 突变汇集于此 |
-| `model.rs` | 188 | 可序列化类型：`BoardDoc` / `Placement` / `Asset` / `Annotation` / `Shape` / `BoardMeta`（含 per-Board 生成档位 `gen_model/gen_effort/gen_service_tier`）/ `GenSettings` |
+| `model.rs` | 188 | 可序列化类型：`BoardDoc` / `Placement` / `Asset` / `Annotation` / `Shape` / `BoardMeta`（含 per-Board 生成档位与权限；`meta.json` 落盘为 `genModel/genEffort/genServiceTier/permissionMode`）/ `GenSettings` / `PermissionSettings` |
 | `storage.rs` | 57 | 原子读写 `board.json` / `meta.json`（temp + rename），meta 解析失败会 warn（不静默默认化）|
 | `workspace.rs` | 117 | 全局工作区注册表（`~/.cameo/boards.jsonl`）|
 | `session.rs` | 176 | 每个 Board 多会话：`sessions.json`（索引 + threadId）+ `sessions/<id>.jsonl`（消息时间线）。**时间线由 runtime（codex.rs）权威写入**（见 §5）；append 失败会 warn |
@@ -146,7 +146,7 @@ Cameo 是一个**桌面 app**（Tauri 2 + React + PixiJS），把 OpenAI 的 **C
 **Codex 集成（详见 §5）**
 | 文件 | 行数 | 职责 |
 |---|---:|---|
-| `codex.rs` | 2737 | **核心**：spawn `codex app-server` → JSON-RPC `initialize` / `thread/start` / `turn/start`（显式下发 model/effort/serviceTier/summary/personality）+ active-turn `turn/steer` → drain items → 转 `UnifiedEvent`。还负责 `model/list`、per-Board 生成档位、以及**消息时间线权威落盘**（user 记录在 turn 开始、assistant 在 turn 结束写入 active session）。协议细节见 [`CODEX_PROTOCOL.md`](./CODEX_PROTOCOL.md) |
+| `codex.rs` | 2737 | **核心**：spawn `codex app-server` → JSON-RPC `initialize` / `thread/start` / `turn/start`（显式下发 model/effort/serviceTier/summary/personality + approval/sandbox）+ active-turn `turn/steer` → drain items → 转 `UnifiedEvent`。还负责 `model/list`、per-Board 生成档位 / 权限、以及**消息时间线权威落盘**（user 记录在 turn 开始、assistant 在 turn 结束写入 active session）。协议细节见 [`CODEX_PROTOCOL.md`](./CODEX_PROTOCOL.md) |
 | `process.rs` | 31 | 子进程小工具；Windows 下给 Codex / taskkill 等 console 子进程加 `CREATE_NO_WINDOW` |
 | `runtime.rs` | 89 | runtime-agnostic 事件枚举：`UnifiedEvent`（SessionInit / TextDelta / Thinking* / Tool* / GenerationStarted / ImageGenerated / TurnComplete / RateLimits / …）|
 | `prompt.rs` | 32 | 系统提示 + 引用图块格式 |
@@ -193,12 +193,12 @@ Cameo 是一个**桌面 app**（Tauri 2 + React + PixiJS），把 OpenAI 的 **C
 launch
   └─ spawn `codex app-server`（PATH 已 augment：brew / cargo / npm/pnpm / nvm/fnm/asdf/mise/volta / scoop；GUI 启动兜底读 shell PATH）
   └─ JSON-RPC initialize（含 `initialized` 回握手）
-  └─ thread/start  ──►  threadId（存进 SessionMeta）
+  └─ thread/start（approval=never + per-Board sandbox）──► threadId（存进 SessionMeta）
                     ◄──  item/* stream（textDelta / thinking* / tool* / imageGeneration / …）
 
 user 发第一条
   ├─ App 渲染选中的图为 clean PNG + overlay PNG（写到 `<folder>/.cameo/tmp/`）
-  ├─ turn/start { content: [text, localImage(clean), localImage(overlay), …] }
+  ├─ turn/start { content: [text, localImage(clean), localImage(overlay), …], model/effort/tier, approval/sandboxPolicy }
   ├─ Codex 自己读图、推理、出图
   ├─ item.imageGeneration 来了：
   │    • 有 savedPath → 直接 import_generated_file
@@ -235,7 +235,7 @@ TS 侧镜像于 `src/types.ts::CodexEvent`（serde camelCase wire form）。
 | `turnComplete` / `sessionComplete` / fatal `error` | chat store + watchdog | turnStatus → idle；watchdog stop |
 | `log` | chat store | 运行时诊断 note；**不**改变 turnStatus，不算 watchdog 进度 |
 | `rateLimits` | chat store | primary（5h）+ secondary（weekly）两窗口都更新 |
-| `permissionRequest` | Cameo 自动 accept | workspace-write 沙箱兜底（与 Riff 故意 deny 相反）|
+| `permissionRequest` | Cameo 自动 accept | 当前输入框两档都固定 `approvalPolicy:"never"`；未来若暴露交互审批，必须先重写自动 accept |
 
 ### 5.3 健壮性三件套
 
@@ -296,6 +296,7 @@ TS 侧镜像于 `src/types.ts::CodexEvent`（serde camelCase wire form）。
 | `store/ui.ts` | 72 | 画布 stats / 面板可见性 / mark 工具状态 / 选中 / 上下文菜单 |
 | `store/composer.ts` | 39 | 输入草稿 + 引用 pill |
 | `store/genSettings.ts` | 130 | per-Board 生成档位（模型 / 智能 effort / 速度 service tier）；`model/list` 缓存 + 切模型时 clamp effort/tier + 失效模型兜底；改动经 `ipc.setGenSettings` 持久化（Rust 落 meta.json 并推到 live session）|
+| `store/permissionSettings.ts` | — | per-Board Codex 权限 preset（工作区访问 / 完全访问）；改动经 `ipc.setPermissionSettings` 持久化到 meta.json 并推到 live session，下一轮 `turn/start` 生效 |
 | `store/history.ts` | 49 | undo / redo 时间线 |
 | `store/settings.ts` | 122 | proxy / close-to-tray / telemetry opt-out / 更新 nonce |
 | `store/workspace.ts` | 74 | 最近工作区 / 当前激活 / sidebar 可见 |
@@ -319,8 +320,8 @@ TS 侧镜像于 `src/types.ts::CodexEvent`（serde camelCase wire form）。
 
 - **聊天**：`ChatPanel.tsx` / `ChatInlineImage.tsx` / `Composer.tsx` / `GenSettingsMenu.tsx` /
   `StreamingStatus.tsx` —— 消息列表、流式指示器、composer 栏 + 生成档位选择器（模型 / 智能 /
-  速度，对照官方 Codex app 的输入框菜单）；inline image 检测（markdown / link / plain path）+ 右键
-  菜单（复制 / 引用 / 加到画布 / 在 Finder 显示）。
+  速度）+ 权限选择器（工作区访问 / 完全访问），对照官方 Codex app 的输入框菜单；inline image
+  检测（markdown / link / plain path）+ 右键菜单（复制 / 引用 / 加到画布 / 在 Finder 显示）。
 - **画布 chrome**：`SelectionBar.tsx` / `CropOverlay.tsx` / `CanvasContextMenu.tsx` —— 选中浮动条、
   crop 编辑 UI、右键菜单。
 - **Gallery**：`gallery/GalleryButton.tsx` / `GalleryCard.tsx` / `GalleryDetail.tsx` /
@@ -388,7 +389,7 @@ TS 侧镜像于 `src/types.ts::CodexEvent`（serde camelCase wire form）。
 | 路径 | 内容 | 所有者 |
 |---|---|---|
 | `board.json` | `BoardDoc`：Placement[] / Annotation[] / 布局 | `board.rs` + `storage.rs` |
-| `meta.json` | `BoardMeta`：threadId / 显示名 / active session / **per-Board 生成档位（gen_model/gen_effort/gen_service_tier，additive Option）** | `board.rs` + `storage.rs` |
+| `meta.json` | `BoardMeta`：threadId / 显示名 / active session / **per-Board 生成档位（genModel/genEffort/genServiceTier）+ 权限（permissionMode，默认 workspace，additive Option）** | `board.rs` + `storage.rs` |
 | `sessions.json` | active session id + `SessionMeta[]` | `session.rs` |
 | `sessions/<id>.jsonl` | 消息时间线（`ChatMessage` JSON）。**由 runtime（codex.rs）权威写入**，绑定 turn 的 session、不依赖前端聚焦（修复了旧版前端 best-effort 落盘可能静默丢历史的问题）| `codex.rs` 写 / `session.rs` IO |
 | `thumbs/` | blake3-named 缩略图缓存 | `assets.rs` |

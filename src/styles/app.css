@@ -3302,11 +3302,10 @@ body.cm-chat-resizing {
   opacity: 0.7;
 }
 
-/* Popover opens upward (composer sits at the bottom). */
+/* Popover is portaled to <body> and positioned from the trigger rect, so left
+ * flyouts are not clipped by the chat panel's overflow boundary. */
 .cm-gen__menu {
-  position: absolute;
-  right: 0;
-  bottom: calc(100% + 6px);
+  position: fixed;
   z-index: var(--cm-z-menu);
   min-width: 196px;
   display: flex;
@@ -3390,20 +3389,37 @@ body.cm-chat-resizing {
   border-radius: var(--cm-radius-lg);
   box-shadow: var(--cm-shadow-3);
 }
+.cm-gen__menu[data-flyout-side="right"] .cm-gen__flyout {
+  right: auto;
+  left: calc(100% + 5px);
+}
+.cm-gen__flyout--permission {
+  width: 288px;
+  max-width: calc(100vw - 16px);
+}
 .cm-gen__item--rich {
   align-items: flex-start;
+}
+.cm-gen__flyout--permission .cm-gen__item--rich {
+  white-space: normal;
 }
 .cm-gen__rich {
   flex: 1;
   display: flex;
   flex-direction: column;
   gap: 2px;
+  min-width: 0;
 }
 .cm-gen__desc {
   font-size: 11px;
+  line-height: 1.35;
   color: var(--cm-fg-secondary);
 }
 .cm-gen__zap {
+  color: var(--cm-accent);
+  vertical-align: -2px;
+}
+.cm-gen__shield {
   color: var(--cm-accent);
   vertical-align: -2px;
 }

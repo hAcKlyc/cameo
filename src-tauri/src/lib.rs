@@ -141,6 +141,8 @@ pub fn run() {
             commands::send_message,
             commands::get_gen_settings,
             commands::set_gen_settings,
+            commands::get_permission_settings,
+            commands::set_permission_settings,
             commands::list_models,
             commands::list_skills,
             commands::interrupt_turn,

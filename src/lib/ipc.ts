@@ -12,6 +12,7 @@ import type {
   GenSettings,
   ImportResult,
   ModelInfo,
+  PermissionSettings,
   Placement,
   PlacementUpdate,
   ProxyProbeResult,
@@ -145,6 +146,10 @@ export const ipc = {
   getGenSettings: (boardId: string) => invoke<GenSettings>("get_gen_settings", { boardId }),
   setGenSettings: (boardId: string, settings: GenSettings) =>
     invoke<void>("set_gen_settings", { boardId, settings }),
+  getPermissionSettings: (boardId: string) =>
+    invoke<PermissionSettings>("get_permission_settings", { boardId }),
+  setPermissionSettings: (boardId: string, settings: PermissionSettings) =>
+    invoke<void>("set_permission_settings", { boardId, settings }),
   listModels: (boardId: string) => invoke<ModelInfo[]>("list_models", { boardId }),
   listSkills: (boardId: string, forceReload = false) =>
     invoke<CodexSkillInfo[]>("list_skills", { boardId, forceReload }),

@@ -1445,6 +1445,31 @@ pub fn set_gen_settings(
     Ok(())
 }
 
+/// Read the Board's saved Codex permission preset. Works without a live Codex
+/// session (reads meta.json).
+#[tauri::command]
+pub fn get_permission_settings(
+    board_id: String,
+    registry: State<'_, Arc<BoardRegistry>>,
+) -> Result<crate::model::PermissionSettings, String> {
+    let folder = registry.folder(&board_id).ok_or("unknown board")?;
+    Ok(codex::get_permission_settings(&folder))
+}
+
+/// Persist the Board's Codex permission preset and push it onto the live
+/// session (if any). Unknown values are clamped to the product default.
+#[tauri::command]
+pub fn set_permission_settings(
+    board_id: String,
+    settings: crate::model::PermissionSettings,
+    registry: State<'_, Arc<BoardRegistry>>,
+    codex: State<'_, Arc<CodexRegistry>>,
+) -> Result<(), String> {
+    let folder = registry.folder(&board_id).ok_or("unknown board")?;
+    codex::set_permission_settings(codex.inner(), &folder, &board_id, settings);
+    Ok(())
+}
+
 /// Enumerate selectable models for the composer menu (via Codex `model/list`).
 #[tauri::command]
 pub async fn list_models(

@@ -1,8 +1,8 @@
 # CODEX_PROTOCOL.md — Codex app-server 协议真相源
 
 > Cameo 用本机 **Codex CLI 的 `codex app-server`** 作为唯一 agent runtime。本文件是
-> **Codex 协议层面的真相源**：连接方式、JSON-RPC 方法、生成参数语义、事件流、图像 I/O、
-> 以及这些在 Cameo 里**落在哪、怎么用**。
+> **Codex 协议层面的真相源**：连接方式、JSON-RPC 方法、生成参数 / 权限参数语义、事件流、
+> 图像 I/O、以及这些在 Cameo 里**落在哪、怎么用**。
 >
 > 与其它文档的分工：
 > - [`ARCHITECTURE.md`](./ARCHITECTURE.md) = 系统架构（模块边界 / 存储 / 构建）。
@@ -93,11 +93,13 @@ threadId, input[], summary, effort, model, serviceTier, personality,
 cwd, sandboxPolicy, approvalPolicy, approvalsReviewer, outputSchema
 ```
 - **生成档位 override：`model` / `effort` / `serviceTier` / `summary` / `personality`** —— 见 §4。
+- **权限 override：`approvalPolicy` / `sandboxPolicy`** —— 见 §4。
 - `input[]` 见 §7。`outputSchema` 可约束最终 assistant 消息为指定 JSON Schema（Cameo 暂未用）。
 
-Cameo 现状：`turn/start` 发 `{ threadId, input, summary }`（`codex.rs:1420`）；
-`thread/start` 发 `{ cwd, model:null, approvalPolicy:"never", sandbox:"workspace-write",
-developerInstructions, ephemeral:false }`（`codex.rs:1188`）。
+Cameo 现状：`thread/start` / `thread/resume` 固定 `approvalPolicy:"never"`，并按 Board 的
+`permissionMode` 选择 `sandbox:"workspace-write"` 或 `"danger-full-access"`；`turn/start` 每轮显式
+下发 `model` / `effort` / `serviceTier` / `summary:"auto"` / `personality:"friendly"` /
+`approvalPolicy:"never"` / `sandboxPolicy`。
 
 ---
 
@@ -129,6 +131,7 @@ Some(None)` 把配置 tier 覆盖成 None，证明 null 是主动 override 非 n
 | `summary` | `ReasoningSummary` | `auto` / `concise` / `detailed` / `none` |
 | `personality` | `Personality` | `none` / `friendly` / `pragmatic` |
 | `sandbox` | `SandboxMode` | `read-only` / `workspace-write` / `danger-full-access` |
+| `sandboxPolicy` | `SandboxPolicy` | `readOnly` / `workspaceWrite` / `dangerFullAccess` / `externalSandbox` |
 | `approvalPolicy` | `AskForApproval` | `untrusted` / `on-failure` / `on-request` / `never` |
 | `serviceTier` | `string`/`null` | 取自 `model/list` 的 `serviceTiers[].id`（实测快速档 = `"priority"`） |
 
@@ -137,10 +140,29 @@ Some(None)` 把配置 tier 覆盖成 None，证明 null 是主动 override 非 n
 >   `default_reasoning_summary="none"`，传 `auto` 后摘要可能为空 —— 改前先看思考块是否还渲染。
 > - `personality` 是**行为/口吻变更**（friendly / pragmatic 是不同指令块），不是纯参数。
 
-### Cameo 当前默认（坑）
-`model:null` + 不传 `effort` → **回落用户 `~/.codex/config.toml`**（典型 `gpt-5.5 + xhigh`），
-这是生图"慢"的主因，且体感随每个用户的 Codex 配置而变、不可控。
-**0.1.6 起**在 `turn/start` 显式下发档位（见 PRD `prd_0.1.6_generation_controls.md`）。
+### Cameo 当前默认
+
+**0.1.6 起**，Cameo 在 `turn/start` 显式下发生成档位（见 PRD
+`prd_0.1.6_generation_controls.md`），不再让 `model:null` + 省略 `effort` 回落用户
+`~/.codex/config.toml`。产品默认是 `model:"gpt-5.5"`、`effort:"medium"`、`serviceTier:null`
+（标准档）、`summary:"auto"`、`personality:"friendly"`。
+
+### 权限下发（0.1.9）
+
+Cameo 输入框菜单只暴露两个无审批 preset；二者都固定 `approvalPolicy:"never"`，差异只在 Codex
+sandbox 边界：
+
+| UI | thread/start / resume | turn/start |
+|---|---|---|
+| 工作区访问（默认） | `sandbox:"workspace-write"` | `sandboxPolicy:{ "type":"workspaceWrite" }` |
+| 完全访问 | `sandbox:"danger-full-access"` | `sandboxPolicy:{ "type":"dangerFullAccess" }` |
+
+- 选择按 per-Board 持久化到 `.cameo/meta.json` 的 `permissionMode`（`"workspace"` /
+  `"fullAccess"`）；旧 Board 缺字段时回落工作区访问。
+- `turn/start` 每轮显式携带权限字段，避免 Codex sticky 设置与 UI 不一致。
+- `read-only`、`on-request`、custom permission profile、Windows `elevated` / `unelevated`
+  sandbox implementation 都是真实 Codex 能力，但不属于本期输入框二选一。
+- "完全访问"表示 **no Codex sandbox**，不是 root/admin，不绕过 OS ACL 或 Windows UAC。
 
 ---
 
@@ -276,27 +298,34 @@ codex app-server generate-json-schema --out <dir>
 
 | 关注点 | 位置 |
 |---|---|
-| spawn app-server | `src-tauri/src/codex.rs:962` |
+| spawn app-server | `src-tauri/src/codex.rs` `start_session` |
 | JSON-RPC client（call/write/reader） | `src-tauri/src/codex.rs` `CodexSessionInner` |
-| `thread/start` / `resume`（`ensure_thread`） | `src-tauri/src/codex.rs:1105` |
-| `turn/start` 派发（`send_message`） | `src-tauri/src/codex.rs:1339` / 1420 |
-| `build_turn_prompt`（D4 路径内嵌） | `src-tauri/src/codex.rs:1445` |
+| `thread/start` / `resume`（`ensure_thread`） | `src-tauri/src/codex.rs` `ensure_thread` / `sync_thread_permission_if_dirty` |
+| `turn/start` 派发（`send_message`） | `src-tauri/src/codex.rs` `send_message` / `turn_start_params` |
+| `build_turn_prompt`（D4 路径内嵌） | `src-tauri/src/codex.rs` `build_turn_prompt` |
 | developer instructions（系统提示） | `src-tauri/src/prompt.rs` |
-| `imageGeneration` 处理 | `src-tauri/src/codex.rs:~2187` |
+| `imageGeneration` 处理 | `src-tauri/src/codex.rs` `on_image_generation` |
 | UnifiedEvent 定义 | `src-tauri/src/runtime.rs` |
 | 事件 → 前端 | `src/store/chat.ts::handleEvent` + `src/types.ts` `CodexEvent` |
-| auth 探针 | `src-tauri/src/codex.rs:~440` / `probe_codex_auth` |
+| auth 探针 | `src-tauri/src/codex.rs` `probe_codex_auth` |
 
 ### 已锁决策（与协议相关）
 - runtime 抽象保留可换（v1 仅 Codex），上层只消费 `UnifiedEvent`。
 - 引用走文件路径 + agent 自读（D4），不挂传图。
-- approval=`never` + sandbox=`workspace-write`（Board folder 内编辑的自然默认）。
+- approval=`never`；sandbox 默认 `workspace-write`，可由输入框权限菜单切到 `danger-full-access`。
 - 标记 = overlay-as-image（发图，不依赖结构化 mask API）。
 
 ### 已实现（0.1.6）
 - 生成档位选择器（`prd_0.1.6_generation_controls.md`）：`turn/start` 显式下发
   model/effort/serviceTier + summary=auto/personality=friendly，输入框暴露模型/智能/速度选择器，
   per-Board 持久化到 meta.json（`store/genSettings.ts` + `codex.rs` `set_gen_settings`）。
+
+### 已实现（0.1.9）
+- 权限选择器（`prd_0.1.9_permission_controls.md`）：输入框菜单底部暴露工作区访问 / 完全访问两档；
+  per-Board 持久化到 `meta.json.permissionMode`；`thread/start` / `thread/resume` 写 legacy
+  `sandbox`，`turn/start` 每轮显式写 `approvalPolicy:"never"` + structured `sandboxPolicy`。若用户在
+  已有 thread 上切换权限，runtime 会标记 active thread dirty，并在下一轮 fresh `turn/start` 前先
+  `thread/resume` 同步 legacy `sandbox`。
 - **消息时间线由 runtime 权威落盘**：`codex.rs` 在 turn 开始写 user 记录、turn 结束写 assistant
   记录到 active session 的 `.cameo/sessions/<id>.jsonl`，不依赖前端聚焦（修复静默丢历史）。
 - **全产品网络出口统一走代理**：cloud API（`cloud_request` 命令）+ gallery 图片（`cmnet://`
