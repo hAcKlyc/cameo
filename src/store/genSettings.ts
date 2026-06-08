@@ -15,6 +15,7 @@
 
 import { create } from "zustand";
 import { ipc } from "../lib/ipc";
+import { useSettingsStore } from "./settings";
 import type { ModelInfo, ServiceTierInfo } from "../types";
 
 /** Reasoning-effort levels exposed in the menu, in display order. Codex also
@@ -24,6 +25,11 @@ export type Effort = (typeof EXPOSED_EFFORTS)[number];
 
 export const DEFAULT_MODEL = "gpt-5.5";
 export const DEFAULT_EFFORT: Effort = "medium";
+
+const MODEL_LIST_CACHE_TTL_MS = 2 * 60 * 1000;
+
+const modelListCache = new Map<string, { loadedAt: number; models: ModelInfo[] }>();
+const modelListInflight = new Map<string, Promise<ModelInfo[]>>();
 
 interface GenState {
   /** Board these values belong to (guards async races across board switches). */
@@ -54,6 +60,36 @@ function persist(s: Pick<GenState, "boardId" | "model" | "effort" | "serviceTier
     });
 }
 
+function modelListCacheKey(boardId: string): string {
+  return `${boardId}\0${useSettingsStore.getState().restartNonce}`;
+}
+
+function freshModelListCache(boardId: string): ModelInfo[] | null {
+  const cached = modelListCache.get(modelListCacheKey(boardId));
+  if (!cached || Date.now() - cached.loadedAt > MODEL_LIST_CACHE_TTL_MS) return null;
+  return cached.models;
+}
+
+async function listModelsCached(boardId: string): Promise<ModelInfo[]> {
+  const cached = freshModelListCache(boardId);
+  if (cached) return cached;
+  const key = modelListCacheKey(boardId);
+  const inflight = modelListInflight.get(key);
+  if (inflight) return inflight;
+
+  const promise = ipc.listModels(boardId).then((models) => {
+    modelListCache.set(key, { loadedAt: Date.now(), models });
+    return models;
+  });
+  modelListInflight.set(key, promise);
+
+  try {
+    return await promise;
+  } finally {
+    modelListInflight.delete(key);
+  }
+}
+
 /** Efforts to show for a model: its supported set ∩ the exposed levels, in
  *  display order. Empty `supported` (list not loaded yet) → all exposed. */
 export function effortsFor(m: ModelInfo | undefined): Effort[] {
@@ -74,7 +110,7 @@ export const useGenStore = create<GenState>((set, get) => ({
   models: [],
 
   load: async (boardId) => {
-    set({ boardId, models: [] });
+    set({ boardId, models: freshModelListCache(boardId) ?? [] });
     try {
       const gs = await ipc.getGenSettings(boardId);
       if (get().boardId !== boardId) return; // board switched mid-flight
@@ -91,7 +127,7 @@ export const useGenStore = create<GenState>((set, get) => ({
 
   fetchModels: async (boardId) => {
     try {
-      const models = await ipc.listModels(boardId);
+      const models = await listModelsCached(boardId);
       if (get().boardId !== boardId) return;
       set({ models });
       // Vanished-model fallback: persisted model no longer offered → reset to a

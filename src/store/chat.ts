@@ -247,7 +247,7 @@ function forceRestartSession(
   endTurn("aborted", reason);
   const autoRestart = opts.autoRestart ?? true;
   const boardId = useBoardStore.getState().boardId;
-  const { messages } = st;
+  const messages = drainStreamDeltas(st.messages);
 
   // C2 fix — capture boardId NOW; the IIFE's async chain may take 100s of ms
   // and the user might switch boards in the meantime. We only restart THIS
@@ -410,6 +410,59 @@ const watchdog = new InactivityWatchdog({
   },
 });
 
+type StreamDelta = { kind: "text"; text: string } | { kind: "thinking"; text: string };
+
+let streamDeltaBuffer: StreamDelta[] = [];
+let streamFlushScheduled = false;
+
+function applyStreamDeltas(messages: ChatMessage[], deltas: StreamDelta[]): ChatMessage[] {
+  let next = messages;
+  for (const d of deltas) {
+    next =
+      d.kind === "text"
+        ? updateLast(next, (m) => appendText(m, d.text))
+        : updateLast(next, (m) => appendThinking(m, d.text));
+  }
+  return next;
+}
+
+function flushStreamDeltas() {
+  if (streamDeltaBuffer.length === 0) return;
+  useChatStore.setState((st) => ({ messages: drainStreamDeltas(st.messages) }));
+}
+
+function drainStreamDeltas(messages: ChatMessage[]): ChatMessage[] {
+  if (streamDeltaBuffer.length === 0) return messages;
+  const batch = streamDeltaBuffer;
+  streamDeltaBuffer = [];
+  streamFlushScheduled = false;
+  return applyStreamDeltas(messages, batch);
+}
+
+function scheduleStreamFlush() {
+  if (streamFlushScheduled) return;
+  streamFlushScheduled = true;
+  const run = () => {
+    streamFlushScheduled = false;
+    flushStreamDeltas();
+  };
+  if (typeof window !== "undefined" && window.requestAnimationFrame) {
+    window.requestAnimationFrame(run);
+  } else {
+    setTimeout(run, 16);
+  }
+}
+
+function enqueueStreamDelta(delta: StreamDelta) {
+  const last = streamDeltaBuffer[streamDeltaBuffer.length - 1];
+  if (last?.kind === delta.kind) {
+    last.text += delta.text;
+  } else {
+    streamDeltaBuffer.push({ ...delta });
+  }
+  scheduleStreamFlush();
+}
+
 export const useChatStore = create<ChatState>((set, get) => ({
   sessionStatus: "idle",
   turnStatus: "idle",
@@ -425,6 +478,8 @@ export const useChatStore = create<ChatState>((set, get) => ({
     // Board switch / session rebuild — any in-flight watchdog from a previous
     // turn must die or it could fire against the new session.
     watchdog.stop();
+    streamDeltaBuffer = [];
+    streamFlushScheduled = false;
     set({
       sessionStatus: "idle",
       turnStatus: "idle",
@@ -440,6 +495,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
   setSessionStatus: (s, error) => set({ sessionStatus: s, error: error ?? null }),
 
   startTurn: (text, refs) => {
+    flushStreamDeltas();
     const userMsg: ChatMessage = { id: newId(), role: "user", text, refs };
     const asstMsg: ChatMessage = { id: newId(), role: "assistant", blocks: [], status: "streaming" };
     set((st) => ({
@@ -475,9 +531,13 @@ export const useChatStore = create<ChatState>((set, get) => ({
     return { boardId, sessionId: activeSessionId, assistantId: asstMsg.id };
   },
 
-  failTurn: (reason, scope) => set((st) => failLocalTurn(st, reason, scope)),
+  failTurn: (reason, scope) => {
+    flushStreamDeltas();
+    set((st) => failLocalTurn(st, reason, scope));
+  },
 
   stopTurn: () => {
+    flushStreamDeltas();
     const st = get();
     if (st.turnStatus !== "running") return;
     const boardId = useBoardStore.getState().boardId;
@@ -519,6 +579,15 @@ export const useChatStore = create<ChatState>((set, get) => ({
     // their own case body. New event kinds added in the future must opt in
     // here AND, if terminal, call `watchdog.stop()` in the case body.
     if (PROGRESS_EVENT_KINDS.has(e.kind)) watchdog.touch();
+    if (e.kind === "textDelta") {
+      enqueueStreamDelta({ kind: "text", text: e.text });
+      return;
+    }
+    if (e.kind === "thinkingDelta") {
+      enqueueStreamDelta({ kind: "thinking", text: e.text });
+      return;
+    }
+    flushStreamDeltas();
     // Per-turn telemetry taps (side effects, kept out of the pure set() updater).
     // endTurn is idempotent, so a turnComplete followed by a stray error won't
     // double-count. See services/cloud/turnMetrics.ts.
@@ -530,16 +599,12 @@ export const useChatStore = create<ChatState>((set, get) => ({
       switch (e.kind) {
         case "sessionInit":
           return { sessionStatus: "ready" };
-        case "textDelta":
-          return { messages: updateLast(st.messages, (m) => appendText(m, e.text)) };
         case "thinkingStart":
           return {
             messages: updateLast(st.messages, (m) =>
               pushBlock(m, { type: "thinking", text: "", active: true, startedAt: Date.now() })
             ),
           };
-        case "thinkingDelta":
-          return { messages: updateLast(st.messages, (m) => appendThinking(m, e.text)) };
         case "thinkingStop":
           return {
             messages: updateLast(st.messages, (m) =>
