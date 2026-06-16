@@ -1748,6 +1748,49 @@ pub async fn cloud_request(req: CloudRequest) -> Result<CloudResponse, String> {
     Ok(CloudResponse { status, body })
 }
 
+#[tauri::command]
+pub async fn cloud_agent_status(
+    state: State<'_, Arc<crate::cloud_agent::CloudAgentState>>,
+) -> Result<crate::cloud_agent::CloudAgentStatus, String> {
+    Ok(crate::cloud_agent::status(state.inner().clone()).await)
+}
+
+#[tauri::command]
+pub async fn cloud_agent_pair(
+    app: AppHandle,
+    state: State<'_, Arc<crate::cloud_agent::CloudAgentState>>,
+    api_base: String,
+    pairing_code: String,
+    name: String,
+    max_concurrent_sessions: u32,
+) -> Result<crate::cloud_agent::CloudAgentStatus, String> {
+    crate::cloud_agent::pair(
+        app,
+        state.inner().clone(),
+        api_base,
+        pairing_code,
+        name,
+        max_concurrent_sessions,
+    )
+    .await
+}
+
+#[tauri::command]
+pub async fn cloud_agent_start(
+    app: AppHandle,
+    state: State<'_, Arc<crate::cloud_agent::CloudAgentState>>,
+) -> Result<(), String> {
+    crate::cloud_agent::start(app, state.inner().clone()).await
+}
+
+#[tauri::command]
+pub async fn cloud_agent_stop(
+    state: State<'_, Arc<crate::cloud_agent::CloudAgentState>>,
+) -> Result<(), String> {
+    crate::cloud_agent::stop(state.inner().clone()).await;
+    Ok(())
+}
+
 // ── App config (global ~/.cameo/config.json) + diagnostics ───────────────────
 
 /// Load the global app config (network proxy etc.). Missing/corrupt → defaults.

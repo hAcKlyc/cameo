@@ -170,6 +170,16 @@ export interface CodexAuthStatus {
   requiresLogin: boolean;
 }
 
+export interface CloudAgentStatus {
+  configured: boolean;
+  running: boolean;
+  apiBase?: string | null;
+  agentId?: string | null;
+  teamId?: string | null;
+  name?: string | null;
+  maxConcurrentSessions: number;
+}
+
 export interface CodexSkillInfo {
   name: string;
   displayName: string;

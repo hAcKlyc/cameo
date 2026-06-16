@@ -5,6 +5,7 @@ import type {
   CodexInfo,
   CodexSkillInfo,
   CodexSkillRef,
+  CloudAgentStatus,
   FfmpegStatus,
   Asset,
   BoardInfo,
@@ -41,6 +42,21 @@ export const ipc = {
     headers: Record<string, string>;
     body?: string;
   }) => invoke<{ status: number; body: string }>("cloud_request", { req }),
+  cloudAgentStatus: () => invoke<CloudAgentStatus>("cloud_agent_status"),
+  cloudAgentPair: (
+    apiBase: string,
+    pairingCode: string,
+    name: string,
+    maxConcurrentSessions: number,
+  ) =>
+    invoke<CloudAgentStatus>("cloud_agent_pair", {
+      apiBase,
+      pairingCode,
+      name,
+      maxConcurrentSessions,
+    }),
+  cloudAgentStart: () => invoke<void>("cloud_agent_start"),
+  cloudAgentStop: () => invoke<void>("cloud_agent_stop"),
 
   initialBoard: () => invoke<string | null>("initial_board"),
 

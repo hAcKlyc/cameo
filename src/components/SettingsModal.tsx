@@ -8,7 +8,7 @@ import { VersionSection } from "./VersionSection";
 import { useT, useLocaleStore, type LocaleChoice } from "../i18n/locale";
 import { ipc } from "../lib/ipc";
 import type { MsgKey } from "../i18n/messages";
-import type { FfmpegStatus, ProxyProbeResult, ProxySettings } from "../types";
+import type { CloudAgentStatus, FfmpegStatus, ProxyProbeResult, ProxySettings } from "../types";
 
 const PROTOCOLS: ProxySettings["protocol"][] = ["http", "socks5"];
 
@@ -293,6 +293,8 @@ export function SettingsModal({ onClose }: { onClose: () => void }) {
             )}
           </section>
 
+          <CloudAgentSection />
+
           <FfmpegSection />
 
           <VersionSection />
@@ -307,6 +309,7 @@ export function SettingsModal({ onClose }: { onClose: () => void }) {
 const CAMEO_WEBSITE = "https://cameo.ink";
 const CAMEO_CONTACT = "myagents.io@gmail.com";
 const CAMEO_GITHUB = "https://github.com/hAcKlyc/cameo";
+const CAMEO_CLOUD_API_BASE = "https://cameo-cloud.myagents-io.workers.dev";
 /** The WeChat group QR is the same image cameo.ink serves for the website's
  *  download CTA. We reference it by URL (CSP is null, so the remote <img> loads
  *  directly) rather than bundling it — `npm run qr:update` over in cameo_web
@@ -381,6 +384,129 @@ function AboutFooterSection() {
         <p className="cm-about-meta__copyright">© 2026 Ethan L. All rights reserved.</p>
       </section>
     </>
+  );
+}
+
+function CloudAgentSection() {
+  const [status, setStatus] = useState<CloudAgentStatus | null>(null);
+  const [apiBase, setApiBase] = useState(CAMEO_CLOUD_API_BASE);
+  const [pairingCode, setPairingCode] = useState("");
+  const [name, setName] = useState("Cameo Agent");
+  const [maxConcurrentSessions, setMaxConcurrentSessions] = useState(6);
+  const [error, setError] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
+
+  const refresh = () => {
+    void ipc.cloudAgentStatus().then((next) => {
+      setStatus(next);
+      if (next.apiBase) setApiBase(next.apiBase);
+      if (next.name) setName(next.name);
+      if (next.maxConcurrentSessions) setMaxConcurrentSessions(next.maxConcurrentSessions);
+    }).catch((e) => setError(String(e)));
+  };
+
+  useEffect(() => {
+    refresh();
+    const unlisten = listen<{ kind: string; message: string }>("cloud-agent-event", (event) => {
+      if (event.payload.kind === "error") setError(event.payload.message);
+      refresh();
+    });
+    return () => {
+      void unlisten.then((f) => f());
+    };
+  }, []);
+
+  const pair = () => {
+    setBusy(true);
+    setError(null);
+    void ipc
+      .cloudAgentPair(apiBase, pairingCode, name, maxConcurrentSessions)
+      .then((next) => {
+        setStatus(next);
+        setPairingCode("");
+      })
+      .catch((e) => setError(String(e)))
+      .finally(() => setBusy(false));
+  };
+
+  const toggle = () => {
+    setBusy(true);
+    setError(null);
+    const op = status?.running ? ipc.cloudAgentStop() : ipc.cloudAgentStart();
+    void op
+      .then(refresh)
+      .catch((e) => setError(String(e)))
+      .finally(() => setBusy(false));
+  };
+
+  return (
+    <section className="cm-set-section">
+      <div className="cm-set-section__head">
+        <div className="cm-set-section__text">
+          <h3 className="cm-set-section__title">Cloud Agent</h3>
+          <p className="cm-set-section__desc">
+            Bind this machine to a Cameo Cloud Team and run assigned workspace jobs locally.
+          </p>
+        </div>
+        <div className="cm-set-section__control">
+          <span className={`cm-status cm-status--${status?.running ? "ok" : status?.configured ? "idle" : "err"}`}>
+            {status?.running ? "Running" : status?.configured ? "Paired" : "Not paired"}
+          </span>
+          {status?.configured && (
+            <button className="cm-btn cm-btn--secondary" onClick={toggle} disabled={busy}>
+              {status.running ? "Stop" : "Start"}
+            </button>
+          )}
+        </div>
+      </div>
+
+      <div className="cm-set-proxy">
+        <div className="cm-set-proxy__row">
+          <input
+            className="cm-input cm-input--host"
+            value={apiBase}
+            spellCheck={false}
+            aria-label="Cloud API base"
+            onChange={(e) => setApiBase(e.target.value)}
+          />
+          <input
+            className="cm-input"
+            value={pairingCode}
+            placeholder="Pairing code"
+            spellCheck={false}
+            aria-label="Pairing code"
+            onChange={(e) => setPairingCode(e.target.value)}
+          />
+        </div>
+        <div className="cm-set-proxy__row">
+          <input
+            className="cm-input cm-input--host"
+            value={name}
+            placeholder="Agent name"
+            aria-label="Agent name"
+            onChange={(e) => setName(e.target.value)}
+          />
+          <input
+            className="cm-input cm-input--port"
+            type="number"
+            min={1}
+            max={24}
+            value={maxConcurrentSessions}
+            aria-label="Max concurrent sessions"
+            onChange={(e) => setMaxConcurrentSessions(Math.max(1, Math.min(24, Number(e.target.value) || 1)))}
+          />
+          <button className="cm-btn cm-btn--primary" onClick={pair} disabled={busy || !pairingCode.trim()}>
+            Pair
+          </button>
+        </div>
+        {status?.agentId && (
+          <p className="cm-set-hint">
+            Agent {status.agentId} · Team {status.teamId}
+          </p>
+        )}
+        {error && <p className="cm-set-hint cm-set-hint--err">{error}</p>}
+      </div>
+    </section>
   );
 }
 

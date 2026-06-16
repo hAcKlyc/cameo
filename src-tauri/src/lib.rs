@@ -8,6 +8,7 @@
 pub mod assets;
 pub mod board;
 pub mod codex;
+pub mod cloud_agent;
 pub mod commands;
 pub mod config;
 pub mod device;
@@ -29,6 +30,7 @@ pub mod tray;
 pub mod workspace;
 
 use board::BoardRegistry;
+use cloud_agent::CloudAgentState;
 use codex::CodexRegistry;
 use std::sync::Arc;
 use tauri::{Manager, RunEvent};
@@ -45,6 +47,7 @@ pub fn run() {
 
     let boards: Arc<BoardRegistry> = Arc::new(BoardRegistry::default());
     let codex_reg: Arc<CodexRegistry> = Arc::new(CodexRegistry::default());
+    let cloud_agent_state: Arc<CloudAgentState> = Arc::new(CloudAgentState::default());
     let codex_for_exit = codex_reg.clone();
 
     let app = tauri::Builder::default()
@@ -55,6 +58,7 @@ pub fn run() {
         .plugin(tauri_plugin_process::init())
         .manage(boards)
         .manage(codex_reg)
+        .manage(cloud_agent_state)
         .setup(|app| {
             // Fire-and-forget background update check (60s delayed inside).
             // Errors are swallowed in the worker — updater never blocks boot.
@@ -62,6 +66,7 @@ pub fn run() {
             tauri::async_runtime::spawn(async move {
                 updater::check_update_on_startup(handle).await;
             });
+            cloud_agent::start_if_configured(app.handle().clone());
             tray::setup(app)?;
             Ok(())
         })
@@ -90,6 +95,10 @@ pub fn run() {
             app_version,
             front_log,
             commands::cloud_request,
+            commands::cloud_agent_status,
+            commands::cloud_agent_pair,
+            commands::cloud_agent_start,
+            commands::cloud_agent_stop,
             commands::cfg_load,
             commands::cfg_save,
             commands::probe_proxy,
