@@ -1764,6 +1764,9 @@ pub async fn cloud_agent_pair(
     name: String,
     max_concurrent_sessions: u32,
 ) -> Result<crate::cloud_agent::CloudAgentStatus, String> {
+    if !crate::cloud_agent::cloud_enabled() {
+        return Err("Cameo Cloud is not enabled in this build".into());
+    }
     crate::cloud_agent::pair(
         app,
         state.inner().clone(),
@@ -1780,6 +1783,9 @@ pub async fn cloud_agent_start(
     app: AppHandle,
     state: State<'_, Arc<crate::cloud_agent::CloudAgentState>>,
 ) -> Result<(), String> {
+    if !crate::cloud_agent::cloud_enabled() {
+        return Err("Cameo Cloud is not enabled in this build".into());
+    }
     crate::cloud_agent::start(app, state.inner().clone()).await
 }
 

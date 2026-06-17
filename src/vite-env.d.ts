@@ -5,6 +5,8 @@ interface ImportMetaEnv {
   readonly VITE_CAMEO_API_BASE?: string;
   /** Closed-source cloud API key, baked into official builds. Unset → CLOUD_ENABLED=false. */
   readonly VITE_CAMEO_API_KEY?: string;
+  /** Enables Cameo Cloud Local Agent UI in production official builds. Dev builds stay enabled for local testing. */
+  readonly VITE_CAMEO_CLOUD_ENABLED?: string;
 }
 
 interface ImportMeta {

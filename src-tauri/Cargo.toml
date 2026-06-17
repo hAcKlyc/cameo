@@ -80,10 +80,18 @@ urlencoding = "2"
 nix = { version = "0.29", features = ["signal", "process"] }
 libc = "0.2"
 
+# OS credential store for Cloud Agent refresh credentials.
+[target.'cfg(target_os = "macos")'.dependencies]
+keyring = { version = "3", features = ["apple-native"] }
+
+[target.'cfg(windows)'.dependencies]
+keyring = { version = "3", features = ["windows-native"] }
 # Windows directory junctions — used to inject bundled skills into a Board's
 # `.agents/skills/`. Junctions (unlike symlinks) need no admin / Developer Mode.
-[target.'cfg(windows)'.dependencies]
 junction = "1"
+
+[target.'cfg(all(unix, not(target_os = "macos")))'.dependencies]
+keyring = { version = "3", features = ["linux-native-sync-persistent", "crypto-rust"] }
 
 [features]
 default = ["custom-protocol"]

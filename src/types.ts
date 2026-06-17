@@ -178,6 +178,14 @@ export interface CloudAgentStatus {
   teamId?: string | null;
   name?: string | null;
   maxConcurrentSessions: number;
+  activeSessionCount: number;
+  activeJobs: Array<{
+    jobId: string;
+    workspaceId: string;
+    executionSessionId: string;
+    phase: string;
+    startedAt: string;
+  }>;
 }
 
 export interface CodexSkillInfo {

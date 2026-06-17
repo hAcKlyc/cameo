@@ -293,7 +293,7 @@ export function SettingsModal({ onClose }: { onClose: () => void }) {
             )}
           </section>
 
-          <CloudAgentSection />
+          {CAMEO_CLOUD_ENABLED && <CloudAgentSection />}
 
           <FfmpegSection />
 
@@ -310,6 +310,7 @@ const CAMEO_WEBSITE = "https://cameo.ink";
 const CAMEO_CONTACT = "myagents.io@gmail.com";
 const CAMEO_GITHUB = "https://github.com/hAcKlyc/cameo";
 const CAMEO_CLOUD_API_BASE = "https://cameo-cloud.myagents-io.workers.dev";
+const CAMEO_CLOUD_ENABLED = import.meta.env.DEV || import.meta.env.VITE_CAMEO_CLOUD_ENABLED === "true";
 /** The WeChat group QR is the same image cameo.ink serves for the website's
  *  download CTA. We reference it by URL (CSP is null, so the remote <img> loads
  *  directly) rather than bundling it — `npm run qr:update` over in cameo_web
@@ -501,9 +502,18 @@ function CloudAgentSection() {
         </div>
         {status?.agentId && (
           <p className="cm-set-hint">
-            Agent {status.agentId} · Team {status.teamId}
+            Agent {status.agentId} · Team {status.teamId} · {status.activeSessionCount}/{status.maxConcurrentSessions} active
           </p>
         )}
+        {status?.activeJobs?.length ? (
+          <div className="cm-set-hint">
+            {status.activeJobs.map((job) => (
+              <div key={job.jobId}>
+                {job.phase} · {job.workspaceId} · {job.jobId}
+              </div>
+            ))}
+          </div>
+        ) : null}
         {error && <p className="cm-set-hint cm-set-hint--err">{error}</p>}
       </div>
     </section>
