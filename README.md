@@ -1,3 +1,5 @@
+
+
 <p align="center">
   <img src="src-tauri/icons/128x128@2x.png" width="88" alt="Cameo" />
 </p>
@@ -77,7 +79,7 @@ A browsable gallery of prompts and results lives at **[cameo.ink/gallery](https:
 Prerequisites (all platforms):
 
 - **Codex CLI** installed and authenticated/configured: `codex login`, `codex login --with-api-key`, or another Codex-supported provider setup. Verify with `codex --version`. Cameo drives your own Codex — it is **not** bundled and does not store API keys.
-- Node 20+ and **pnpm**, plus the **Rust** toolchain (rustup) for Tauri 2.
+- Node 20+ and **pnpm**, plus the **Rust** toolchain (rustup, 1.80+) for Tauri 2.
 - **macOS**: Xcode Command Line Tools (`xcode-select --install`).
 - **Windows**: Visual Studio Build Tools with the *Desktop development with C++* workload, and the WebView2 runtime (preinstalled on Windows 11).
 
